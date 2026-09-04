@@ -1,2 +1,0 @@
-# PostStudioX
-Create. Format. Publish. ✨
