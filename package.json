@@ -1,0 +1,29 @@
+{
+  "name": "telegram-posting-bot",
+  "version": "1.0.0",
+  "description": "Owner-only Telegram bot for composing, scheduling, and managing posts to Telegram channels.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "worker": "node src/queue/worker.js",
+    "watchdog": "node src/watchdog/index.js",
+    "gramjs-monitor": "node src/gramjs-monitor/index.js",
+    "migrate": "node src/db/migrate.js",
+    "gramjs-login": "node src/gramjs-monitor/login.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "pg": "^8.11.5",
+    "ioredis": "^5.4.1",
+    "bullmq": "^5.7.8",
+    "telegram": "^2.22.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "luxon": "^3.4.4",
+    "big-integer": "^1.6.52"
+  }
+}
