@@ -2,7 +2,7 @@ const express = require('express');
 const config = require('./config/env');
 const { buildBot } = require('./bot');
 const { runMigrations } = require('./db/migrate');
-const { getRedis } = require('./queue/redisClient');
+const { safeRedis } = require('./queue/redisClient');
 
 async function main() {
   console.log(`[boot] Starting bot v${config.botVersion} in ${config.nodeEnv} mode...`);
@@ -37,7 +37,7 @@ async function main() {
     }
     // Track webhook liveness for /status - independent of whether the
     // update handling itself succeeds.
-    getRedis().set('webhook:last_update_at', Date.now().toString()).catch(() => {});
+    safeRedis.set('webhook:last_update_at', Date.now().toString()).catch(() => {});
     bot.handleUpdate(req.body, res);
   });
 

@@ -8,7 +8,7 @@
 const { Telegraf, Markup } = require('telegraf');
 const config = require('../config/env');
 const db = require('../db/pool');
-const { getRedis } = require('../queue/redisClient');
+const { safeRedis } = require('../queue/redisClient');
 const channelsModel = require('../db/models/channels');
 const watchdogLog = require('../db/models/watchdogLog');
 const settingsModel = require('../db/models/settings');
@@ -84,7 +84,7 @@ async function checkDatabase() {
 
 async function checkRedis() {
   try {
-    await getRedis().ping();
+    await safeRedis.ping();
   } catch (err) {
     await watchdogLog.record({ level: 'critical', category: 'redis', message: `Redis unreachable: ${err.message}` });
     await alertOwner(`🚨 Redis connection lost: ${err.message}`);
@@ -119,14 +119,14 @@ async function checkChannels() {
 }
 
 async function checkGramjsSession() {
-  const valid = await getRedis().get('gramjs:session_valid');
+  const valid = await safeRedis.get('gramjs:session_valid');
   if (valid === '0') {
     await alertOwner('👁 Views tracking is down — the GramJS session needs manual re-login. Run `npm run gramjs-login` and update GRAMJS_SESSION_STRING.');
   }
 }
 
 async function checkWebhookLiveness() {
-  const last = await getRedis().get('webhook:last_update_at');
+  const last = await safeRedis.get('webhook:last_update_at');
   if (!last) return; // fresh boot, nothing to compare yet
   const minutesAgo = (Date.now() - parseInt(last, 10)) / 60000;
   if (minutesAgo > 60) {

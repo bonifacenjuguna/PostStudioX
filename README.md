@@ -53,6 +53,33 @@ This is your `OWNER_ID`.
 - `WEBHOOK_URL` is your **bot** service's public Railway URL, e.g.
   `https://your-bot.up.railway.app` (no trailing slash, no path).
 
+### 3b. Pre-filling variables for future fresh deployments
+`BOT_VERSION` no longer needs to be set anywhere — it's read straight from
+`package.json` at boot, so it can never go stale on Railway again.
+
+For everything else, Railway won't auto-fill secrets into a brand-new
+service (that's deliberate — they're secrets), but you can get most of the
+way there so a fresh deploy only needs a couple of blanks filled in:
+
+- **Project-level "Shared Variables"** (Railway dashboard → your project →
+  Settings → Shared Variables): put anything that's the *same* across all
+  four services and isn't secret here — `NODE_ENV`, `DEFAULT_TIMEZONE`,
+  the `WATCHDOG_*` thresholds. Any service (existing or newly created) in
+  the project can then reference them (`${{shared.NODE_ENV}}` etc. via the
+  Raw Editor, or just tick "use shared" in the UI) instead of you retyping
+  them per service.
+- **`DATABASE_URL` / `REDIS_URL`** are already auto-populated for any
+  service in the project once the Postgres/Redis plugins are attached —
+  nothing to do here, this already works today.
+- **True per-deploy secrets** (`BOT_TOKEN`, `OWNER_ID`, `WEBHOOK_URL`,
+  `WEBHOOK_SECRET_TOKEN`, `TELEGRAM_API_ID/HASH`, `GRAMJS_SESSION_STRING`,
+  `GRAMJS_ENCRYPTION_KEY`) still need to be entered by hand on a fresh
+  deploy — there's no safe way to bake real secrets into the repo, but
+  each service's **Variables → Raw Editor** lets you paste all of them for
+  that service in one go instead of one field at a time. `.env.example` in
+  this repo is written to be pasted straight into that Raw Editor as your
+  starting template.
+
 ### 4. (Optional) Enable exact view-count tracking
 View counts require a real Telegram **user account** logged in via MTProto
 (GramJS) — the regular Bot API has no endpoint for this. Reactions work

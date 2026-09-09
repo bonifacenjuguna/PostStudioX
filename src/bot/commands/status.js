@@ -1,7 +1,7 @@
 const { Markup } = require('telegraf');
 const config = require('../../config/env');
 const db = require('../../db/pool');
-const { getRedis } = require('../../queue/redisClient');
+const { safeRedis } = require('../../queue/redisClient');
 const channelsModel = require('../../db/models/channels');
 const watchdogLog = require('../../db/models/watchdogLog');
 const emergencyStop = require('../../services/emergencyStop');
@@ -46,7 +46,7 @@ async function buildStatusText() {
   }
   try {
     const start = Date.now();
-    await getRedis().ping();
+    await safeRedis.ping();
     lines.push(`└ Redis: 🟢 Connected (${Date.now() - start}ms)`);
   } catch (err) {
     lines.push(`└ Redis: 🔴 ${err.message}`);
@@ -55,7 +55,7 @@ async function buildStatusText() {
 
   lines.push('📬 TELEGRAM API');
   try {
-    const lastUpdate = await getRedis().get('webhook:last_update_at');
+    const lastUpdate = await safeRedis.get('webhook:last_update_at');
     if (lastUpdate) {
       const secondsAgo = Math.floor((Date.now() - parseInt(lastUpdate, 10)) / 1000);
       lines.push(`└ Webhook: 🟢 Live (last update ${secondsAgo}s ago)`);
@@ -69,8 +69,8 @@ async function buildStatusText() {
 
   lines.push('👁 STATS MONITOR');
   try {
-    const sessionOk = await getRedis().get('gramjs:session_valid');
-    const lastPoll = await getRedis().get('gramjs:last_poll_at');
+    const sessionOk = await safeRedis.get('gramjs:session_valid');
+    const lastPoll = await safeRedis.get('gramjs:last_poll_at');
     lines.push(`└ GramJS session: ${sessionOk === '1' ? '🟢 Valid' : sessionOk === '0' ? '🔴 Invalid/expired' : '⚪ Not configured'}`);
     if (lastPoll) {
       const minutesAgo = Math.floor((Date.now() - parseInt(lastPoll, 10)) / 60000);

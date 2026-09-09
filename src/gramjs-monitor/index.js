@@ -7,14 +7,14 @@ const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const config = require('../config/env');
 const statsModel = require('../db/models/stats');
-const { getRedis } = require('../queue/redisClient');
+const { safeRedis } = require('../queue/redisClient');
 
 const POLL_INTERVAL_MS = 15 * 60 * 1000; // 15 min - deliberately not aggressive, per spec caveat
 
 async function buildClient() {
   if (!config.gramjsApiId || !config.gramjsApiHash || !config.gramjsSessionString) {
     console.warn('[gramjs-monitor] Not configured (missing TELEGRAM_API_ID/HASH or GRAMJS_SESSION_STRING) - views tracking disabled.');
-    await getRedis().set('gramjs:session_valid', '0').catch(() => {});
+    await safeRedis.set('gramjs:session_valid', '0').catch(() => {});
     return null;
   }
 
@@ -29,11 +29,11 @@ async function buildClient() {
     await client.connect();
     const me = await client.getMe();
     console.log(`[gramjs-monitor] Connected as ${me.username || me.id}`);
-    await getRedis().set('gramjs:session_valid', '1');
+    await safeRedis.set('gramjs:session_valid', '1');
     return client;
   } catch (err) {
     console.error('[gramjs-monitor] Failed to connect/authenticate:', err.message);
-    await getRedis().set('gramjs:session_valid', '0');
+    await safeRedis.set('gramjs:session_valid', '0');
     return null;
   }
 }
@@ -62,7 +62,7 @@ async function pollViews(client) {
     }
   }
 
-  await getRedis().set('gramjs:last_poll_at', Date.now().toString());
+  await safeRedis.set('gramjs:last_poll_at', Date.now().toString());
 }
 
 async function start() {

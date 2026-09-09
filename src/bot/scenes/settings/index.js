@@ -5,7 +5,7 @@ const watchdogLog = require('../../../db/models/watchdogLog');
 const emergencyStop = require('../../../services/emergencyStop');
 const exportImport = require('../../../services/exportImport');
 const db = require('../../../db/pool');
-const { getRedis } = require('../../../queue/redisClient');
+const { safeRedis } = require('../../../queue/redisClient');
 const { subScreenReplyKeyboard } = require('../../components/navRow');
 const fs = require('fs');
 const path = require('path');
@@ -260,7 +260,7 @@ async function buildStorageText() {
   `);
   let redisInfo = 'unknown';
   try {
-    const info = await getRedis().info('memory');
+    const info = await safeRedis.info('memory');
     const match = info.match(/used_memory_human:(\S+)/);
     redisInfo = match ? match[1] : 'unknown';
   } catch (_) {}

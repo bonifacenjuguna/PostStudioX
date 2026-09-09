@@ -4,6 +4,12 @@
 
 require('dotenv').config();
 
+// Bot version now comes from package.json by default, not an env var - one
+// less thing to remember to set/update on every fresh Railway deploy. Set
+// BOT_VERSION explicitly only if you ever want to override it (e.g. to
+// flag a hotfix build without bumping package.json).
+const packageJson = require('../../package.json');
+
 function required(name) {
   const val = process.env[name];
   if (!val || val.trim() === '') {
@@ -32,7 +38,7 @@ function optionalInt(name, fallback) {
 const config = {
   botToken: () => required('BOT_TOKEN'),
   ownerId: () => parseInt(required('OWNER_ID'), 10),
-  botVersion: optional('BOT_VERSION', '1.0.0'),
+  botVersion: optional('BOT_VERSION', packageJson.version),
   nodeEnv: optional('NODE_ENV', 'production'),
   isProduction: optional('NODE_ENV', 'production') === 'production',
 
