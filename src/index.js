@@ -108,6 +108,32 @@ async function main() {
     }
   });
 
+  // ─────────────────────────────────────────────────────────────────────
+  // ROOT CAUSE (v5 - the real one): everything patched in v3/v4 only runs
+  // once a request reaches Express. This one sits a layer below that.
+  //
+  // Node's http.Server defaults keepAliveTimeout to 5000ms. Railway's edge
+  // proxy in front of this service reuses keep-alive connections to us for
+  // much longer than that (as basically every L7 proxy does - this is the
+  // same well-documented race that hits Node behind AWS ALB, nginx, Caddy,
+  // etc: https://shuheikagawa.com/blog/2019/04/25/keep-alive-timeout/).
+  // When the proxy forwards Telegram's next webhook POST onto a connection
+  // it still considers reusable, right as Node is independently tearing
+  // that same socket down for being "idle" past 5s, the request can be
+  // dropped before it ever reaches Express - no middleware runs, no route
+  // handler runs, so NOTHING we log ever fires. From Telegram's side: sent
+  // the update, got nothing back, sequential delivery jams exactly as
+  // described. This is why the freeze produced zero application logs no
+  // matter how much we hardened the DB/Redis/Telegram-API call sites -
+  // this failure happens beneath all of that.
+  //
+  // Fix: keep our keepAliveTimeout comfortably above the proxy's idle
+  // timeout, and headersTimeout above that (Node requires headersTimeout >
+  // keepAliveTimeout or it's silently ignored).
+  // ─────────────────────────────────────────────────────────────────────
+  server.keepAliveTimeout = 65000;
+  server.headersTimeout = 66000;
+
   // Graceful shutdown - finish in-flight work, close connections cleanly,
   // rather than being hard-killed by Railway's SIGTERM.
   const shutdown = async () => {
