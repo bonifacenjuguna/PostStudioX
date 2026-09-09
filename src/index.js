@@ -4,6 +4,16 @@ const { buildBot } = require('./bot');
 const { runMigrations } = require('./db/migrate');
 const { getRedis } = require('./queue/redisClient');
 
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[bot] Unhandled rejection:', reason);
+  process.exit(1);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[bot] Uncaught exception:', err);
+  process.exit(1);
+});
+
 async function main() {
   console.log(`[boot] Starting bot v${config.botVersion} in ${config.nodeEnv} mode...`);
 
