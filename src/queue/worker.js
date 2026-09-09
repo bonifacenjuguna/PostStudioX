@@ -13,6 +13,13 @@ const { publishSavedItem } = require('../services/publisher');
 const { scheduleAutoDelete } = require('./queues');
 const watchdogLog = require('../db/models/watchdogLog');
 
+// Visibility only - this process crashing and letting Railway restart it
+// is the intended recovery path (see file header comment), but a silent
+// unhandled rejection with no log line makes that hard to diagnose later.
+process.on('unhandledRejection', (reason) => {
+  console.error('[worker] Unhandled promise rejection:', reason);
+});
+
 const bot = new Telegraf(config.botToken());
 
 // Dedicated BullMQ connection - see redisClient.js for why this can't be

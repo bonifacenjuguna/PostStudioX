@@ -18,6 +18,10 @@ const { scheduledPostQueue, autoDeleteQueue } = require('../queue/queues');
 const bot = new Telegraf(config.botToken());
 const OWNER_ID = config.ownerId();
 
+process.on('unhandledRejection', (reason) => {
+  console.error('[watchdog] Unhandled promise rejection:', reason);
+});
+
 const recentAlerts = new Map(); // dedupe key -> last alert timestamp
 
 async function alertOwner(text, extraButtons = []) {

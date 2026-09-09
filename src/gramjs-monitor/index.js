@@ -11,6 +11,10 @@ const { safeRedis } = require('../queue/redisClient');
 
 const POLL_INTERVAL_MS = 15 * 60 * 1000; // 15 min - deliberately not aggressive, per spec caveat
 
+process.on('unhandledRejection', (reason) => {
+  console.error('[gramjs-monitor] Unhandled promise rejection:', reason);
+});
+
 async function buildClient() {
   if (!config.gramjsApiId || !config.gramjsApiHash || !config.gramjsSessionString) {
     console.warn('[gramjs-monitor] Not configured (missing TELEGRAM_API_ID/HASH or GRAMJS_SESSION_STRING) - views tracking disabled.');
