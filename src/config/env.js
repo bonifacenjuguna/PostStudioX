@@ -36,7 +36,17 @@ const config = {
   nodeEnv: optional('NODE_ENV', 'production'),
   isProduction: optional('NODE_ENV', 'production') === 'production',
 
-  webhookUrl: () => required('WEBHOOK_URL'),
+  // Railway injects RAILWAY_PUBLIC_DOMAIN automatically for services with a
+  // public network, and it always matches the actual assigned domain. Using
+  // it instead of a hardcoded WEBHOOK_URL avoids "invalid webhook URL"
+  // errors caused by stale/mistyped values and removes a manual config step
+  // on every deploy. WEBHOOK_URL is kept as a fallback for local/non-Railway
+  // environments where RAILWAY_PUBLIC_DOMAIN won't be present.
+  webhookUrl: () => {
+    const railwayDomain = optional('RAILWAY_PUBLIC_DOMAIN', null);
+    if (railwayDomain) return `https://${railwayDomain}`;
+    return required('WEBHOOK_URL');
+  },
   webhookSecretToken: () => required('WEBHOOK_SECRET_TOKEN'),
   port: optionalInt('PORT', 3000),
 
