@@ -1,5 +1,5 @@
 const { Queue } = require('bullmq');
-const { getRedis } = require('./redisClient');
+const { getQueueConnection } = require('./redisClient');
 
 // removeOnComplete/removeOnFail limits are set deliberately per the memory
 // budget concern: unbounded BullMQ job history in Redis is a known slow
@@ -12,7 +12,9 @@ const defaultJobOptions = {
 };
 
 function makeQueue(name) {
-  return new Queue(name, { connection: getRedis(), defaultJobOptions });
+  // Dedicated BullMQ connection - never the general-purpose request-path
+  // client (see redisClient.js for why this split matters).
+  return new Queue(name, { connection: getQueueConnection(), defaultJobOptions });
 }
 
 const scheduledPostQueue = makeQueue('scheduled-posts');

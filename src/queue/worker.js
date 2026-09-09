@@ -5,7 +5,7 @@
 
 const { Worker } = require('bullmq');
 const { Telegraf } = require('telegraf');
-const { getRedis } = require('./redisClient');
+const { getQueueConnection } = require('./redisClient');
 const config = require('../config/env');
 const savedItems = require('../db/models/savedItems');
 const channelsModel = require('../db/models/channels');
@@ -15,7 +15,10 @@ const watchdogLog = require('../db/models/watchdogLog');
 
 const bot = new Telegraf(config.botToken());
 
-const connection = getRedis();
+// Dedicated BullMQ connection - see redisClient.js for why this can't be
+// the general-purpose client (Worker needs maxRetriesPerRequest: null for
+// its blocking commands, which must never be mixed with fail-fast calls).
+const connection = getQueueConnection();
 
 const scheduledPostWorker = new Worker(
   'scheduled-posts',
