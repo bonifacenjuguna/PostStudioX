@@ -16,6 +16,15 @@ async function goHome(ctx, { edit = false } = {}) {
   }
 }
 
+async function triggerEmergencyStop(ctx) {
+  await emergencyStop.activate();
+  await clearSession(ctx);
+  await ctx.reply(
+    '🛑 Emergency Stop activated.\n\nAll scheduled posts, auto-deletes, and auto-reposts are paused.\nResume from ⚙️ Settings → 🛡 Watchdog when ready.',
+    homeReplyKeyboard()
+  );
+}
+
 async function registerNavHandlers(bot) {
   bot.action('nav:home', async (ctx) => {
     await ctx.answerCbQuery();
@@ -38,13 +47,21 @@ async function registerNavHandlers(bot) {
 
   bot.action('nav:emergency_stop', async (ctx) => {
     await ctx.answerCbQuery('Stopping everything...');
-    await emergencyStop.activate();
-    await clearSession(ctx);
-    await ctx.reply(
-      '🛑 Emergency Stop activated.\n\nAll scheduled posts, auto-deletes, and auto-reposts are paused.\nResume from ⚙️ Settings → 🛡 Watchdog when ready.',
-      homeReplyKeyboard()
-    );
+    await triggerEmergencyStop(ctx);
+  });
+
+  // v1.1.0 (#6): the persistent reply-keyboard version of Emergency Stop -
+  // always visible regardless of navigation depth, unlike the inline
+  // button variant above which only exists on screens that attach it.
+  // v1.1.0 enhancement: "note" buttons on posts (see buttonBuilder.js) -
+  // tapping shows the note text as a popup instead of opening a link.
+  bot.action(/^note:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery(ctx.match[1], { show_alert: true });
+  });
+
+  bot.hears('🛑 STOP ALL', async (ctx) => {
+    await triggerEmergencyStop(ctx);
   });
 }
 
-module.exports = { registerNavHandlers, goHome };
+module.exports = { registerNavHandlers, goHome, triggerEmergencyStop };

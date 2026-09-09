@@ -1,6 +1,7 @@
 const { Markup } = require('telegraf');
 const channelsModel = require('../../../db/models/channels');
 const savedItems = require('../../../db/models/savedItems');
+const mediaLibrary = require('../../../db/models/mediaLibrary');
 const { parseShorthand, stripLinks } = require('../../../services/telegramFormatter');
 const { buildInlineKeyboard, colorLabel } = require('../../../services/buttonBuilder');
 const { validateDraft } = require('../../../services/preSendValidator');
@@ -15,23 +16,23 @@ function freshDraft() {
   return { channelIds: [], mediaType: null, mediaItems: [], caption: '', entities: [], buttons: [], options: {} };
 }
 
+// v1.1.0 (#4): New Post used to ask which channel(s) to post to *first*,
+// before any content existed - which meant you had to commit to "this is a
+// post going out now" before deciding you might actually want it as a
+// template, a draft, or both. Channel selection now happens at the very
+// end, right before Send/Schedule, via the `awaiting_finish_channels` sub-
+// step - see cp:finish:* below.
 async function enter(ctx) {
-  ctx.session = { scene: 'create-post', step: 'select_channels', draft: freshDraft() };
-  const channels = await channelsModel.list();
-  if (channels.length === 0) {
-    await ctx.reply('No channels registered yet. Go to 📡 Channels first to add one.', homeReplyKeyboard());
-    ctx.session = {};
-    return;
-  }
+  ctx.session = { scene: 'create-post', step: 'media_type', draft: freshDraft() };
   await ctx.reply('Composing a new post.', flowReplyKeyboard());
-  await ctx.reply('Select target channel(s):', channelPickerKeyboard(channels, []));
+  await ctx.reply('What kind of post is this?', mediaTypeKeyboard());
 }
 
 function channelPickerKeyboard(channels, selected) {
   const rows = channels.map((c) => [
     Markup.button.callback(`${selected.includes(c.chat_id) ? '✅' : '⬜'} ${c.title || c.chat_id}`, `cp:chan:${c.chat_id}`),
   ]);
-  rows.push([Markup.button.callback('➡️ Next', 'cp:chan:next')]);
+  rows.push([Markup.button.callback('➡️ Continue', 'cp:chan:next')]);
   rows.push([Markup.button.callback('❌ Cancel', 'nav:cancel')]);
   return Markup.inlineKeyboard(rows);
 }
@@ -41,7 +42,8 @@ function mediaTypeKeyboard() {
     [Markup.button.callback('🖼 Photo', 'cp:type:photo'), Markup.button.callback('🎥 Video', 'cp:type:video')],
     [Markup.button.callback('📄 Document', 'cp:type:document'), Markup.button.callback('💬 Text only', 'cp:type:text')],
     [Markup.button.callback('📊 Poll', 'cp:type:poll'), Markup.button.callback('🖼🎥 Media Group', 'cp:type:media_group')],
-    [Markup.button.callback('⬅️ Back', 'cp:back:channels'), Markup.button.callback('❌ Cancel', 'nav:cancel')],
+    [Markup.button.callback('📚 From Library', 'cp:library')],
+    [Markup.button.callback('❌ Cancel', 'nav:cancel')],
   ]);
 }
 
@@ -54,6 +56,17 @@ function formattingKeyboard(draft) {
     [Markup.button.callback('🔘 Add Buttons', 'cp:buttons:add')],
     [Markup.button.callback('✅ Done, continue', 'cp:fmt:done')],
     [Markup.button.callback('⬅️ Back', 'cp:back:content'), Markup.button.callback('❌ Cancel', 'nav:cancel')],
+  ]);
+}
+
+function pollOptionsKeyboard(draft) {
+  const p = draft.options.poll;
+  return Markup.inlineKeyboard([
+    [Markup.button.callback(`${p.isAnonymous !== false ? '✅' : '⬜'} Anonymous`, 'cp:poll:toggle:isAnonymous')],
+    [Markup.button.callback(`${p.allowsMultiple ? '✅' : '⬜'} Allow multiple answers`, 'cp:poll:toggle:allowsMultiple')],
+    [Markup.button.callback(`${p.quizMode ? '✅' : '⬜'} Quiz mode (one correct answer)`, 'cp:poll:toggle:quizMode')],
+    [Markup.button.callback('➡️ Continue', 'cp:poll:continue')],
+    [Markup.button.callback('❌ Cancel', 'nav:cancel')],
   ]);
 }
 
@@ -94,10 +107,15 @@ async function handleText(ctx) {
   }
 
   if (ctx.session.step === 'awaiting_poll_answers') {
-    draft.options.poll = { question: draft.options.pollQuestion, answers: text.split(',').map((s) => s.trim()).filter(Boolean) };
+    const answers = text.split(',').map((s) => s.trim()).filter(Boolean);
+    if (answers.length < 2) {
+      await ctx.reply('A poll needs at least 2 answer options. Send them again, comma-separated.');
+      return;
+    }
+    draft.options.poll = { question: draft.options.pollQuestion, answers, isAnonymous: true, allowsMultiple: false, quizMode: false };
     delete draft.options.pollQuestion;
-    ctx.session.step = 'preview';
-    await goToPreview(ctx);
+    ctx.session.step = 'poll_options';
+    await ctx.reply('Poll settings:', pollOptionsKeyboard(draft));
     return;
   }
 
@@ -135,12 +153,16 @@ async function handleText(ctx) {
   if (step === 'awaiting_button_text') {
     ctx.session.buttonDraft = { text };
     ctx.session.step = 'awaiting_button_url';
-    await ctx.reply('Now send the URL this button should open.');
+    await ctx.reply('Now send the URL this button should open — or type NOTE: followed by a short message to make a "tap to reveal" note button instead of a link.');
     return;
   }
 
   if (step === 'awaiting_button_url') {
-    ctx.session.buttonDraft.url = text.trim();
+    if (/^note:/i.test(text.trim())) {
+      ctx.session.buttonDraft.note = text.trim().replace(/^note:/i, '').trim().slice(0, 180);
+    } else {
+      ctx.session.buttonDraft.url = text.trim();
+    }
     ctx.session.step = 'awaiting_button_style';
     await ctx.reply('Pick a color style for this button:', Markup.inlineKeyboard([
       [Markup.button.callback('🔵 Primary', 'cp:btnstyle:bg_primary'), Markup.button.callback('🔴 Danger', 'cp:btnstyle:bg_danger')],
@@ -156,6 +178,12 @@ async function handleText(ctx) {
 
   if (step === 'awaiting_template_name') {
     await saveAsTemplate(ctx, text);
+    return;
+  }
+
+  if (step === 'awaiting_template_name_then_send') {
+    await saveAsTemplate(ctx, text, { silent: true });
+    await doSend(ctx, { undoWindow: true });
     return;
   }
 }
@@ -199,18 +227,34 @@ async function goToPreview(ctx) {
   const draft = ctx.session.draft;
   await sendPreview(ctx, draft);
 
-  const validation = await validateDraft(draft);
+  // requireChannels: false - at this point in the flow no channel has been
+  // picked yet on purpose (see enter() above), so only content itself is
+  // validated here. The channel-specific check runs again, with
+  // requireChannels: true, right before Send/Schedule in cp:finish:*.
+  const validation = await validateDraft(draft, { requireChannels: false });
   const rows = [];
   if (!validation.ok) {
     await ctx.reply('⚠️ Issues found before you can send:\n' + validation.issues.map((i) => `• ${i}`).join('\n'));
     rows.push([Markup.button.callback('✏️ Edit Caption', 'cp:edit:caption')]);
   } else {
+    if (validation.warnings.length) {
+      await ctx.reply('💡 Heads up:\n' + validation.warnings.map((w) => `• ${w}`).join('\n'));
+    }
     rows.push([Markup.button.callback('✏️ Edit Caption', 'cp:edit:caption'), Markup.button.callback('🔘 Edit Buttons', 'cp:buttons:add')]);
-    rows.push([Markup.button.callback('💾 Save as Template', 'cp:save:template')]);
-    rows.push([Markup.button.callback('⏰ Schedule', 'cp:schedule'), Markup.button.callback('🚀 Send Now', 'cp:send')]);
+    rows.push([Markup.button.callback('💾 Save as Template', 'cp:save:template'), Markup.button.callback('📝 Save as Draft', 'cp:save:draft')]);
+    rows.push([Markup.button.callback('⏰ Schedule', 'cp:finish:schedule'), Markup.button.callback('🚀 Send Now', 'cp:finish:send')]);
+    rows.push([Markup.button.callback('🚀 Send & 💾 Save as Template', 'cp:finish:send_template')]);
   }
   rows.push([Markup.button.callback('❌ Cancel', 'nav:cancel')]);
-  await ctx.reply(validation.ok ? "Here's your preview 👆 — ready when you are." : 'Fix the issues above, or go back to edit.', Markup.inlineKeyboard(rows));
+  await ctx.reply(validation.ok ? "Here's your preview 👆 — how do you want to finish this?" : 'Fix the issues above, or go back to edit.', Markup.inlineKeyboard(rows));
+}
+
+async function channelNames(chatIds) {
+  const names = await Promise.all(chatIds.map(async (id) => {
+    const ch = await channelsModel.findByChatId(id);
+    return ch?.title || id;
+  }));
+  return names.join(', ');
 }
 
 async function doSend(ctx, { undoWindow = true } = {}) {
@@ -220,6 +264,7 @@ async function doSend(ctx, { undoWindow = true } = {}) {
     mediaItems: draft.mediaItems, caption: draft.caption, entities: draft.entities,
     buttons: draft.buttons, options: draft.options,
   });
+  const names = await channelNames(draft.channelIds);
 
   if (undoWindow) {
     const msg = await ctx.reply('Sending in 5s... ', Markup.inlineKeyboard([[Markup.button.callback('↩️ Undo', `cp:undo:${item.id}`)]]));
@@ -236,7 +281,7 @@ async function doSend(ctx, { undoWindow = true } = {}) {
           const refreshed = await savedItems.findById(item.id);
           await scheduleAutoDelete(item.id, at, (refreshed.current_message_refs || []));
         }
-        await ctx.telegram.editMessageText(msg.chat.id, msg.message_id, undefined, `✅ Posted to ${draft.channelIds.join(', ')}`);
+        await ctx.telegram.editMessageText(msg.chat.id, msg.message_id, undefined, `✅ Posted to ${names}`);
         ctx.session = {};
       } catch (err) {
         await ctx.telegram.sendMessage(msg.chat.id, `🔴 Send failed: ${err.message}`);
@@ -244,7 +289,7 @@ async function doSend(ctx, { undoWindow = true } = {}) {
     }, 5000);
   } else {
     await publishSavedItem(ctx.telegram, item);
-    await ctx.reply(`✅ Posted to ${draft.channelIds.join(', ')}`, homeReplyKeyboard());
+    await ctx.reply(`✅ Posted to ${names}`, homeReplyKeyboard());
     ctx.session = {};
   }
 }
@@ -256,6 +301,10 @@ async function handleScheduleInput(ctx, text) {
     await ctx.reply('Could not parse that. Use format: 2026-09-05 18:30');
     return;
   }
+  if (dt.toUTC().toMillis() <= Date.now()) {
+    await ctx.reply('That time is in the past — send a future date/time.');
+    return;
+  }
   const draft = ctx.session.draft;
   const item = await savedItems.create({
     kind: 'post', status: 'scheduled', channelIds: draft.channelIds, mediaType: draft.mediaType,
@@ -264,18 +313,23 @@ async function handleScheduleInput(ctx, text) {
     autoDeleteAt: draft.options.autoDeleteMinutes ? dt.plus({ minutes: draft.options.autoDeleteMinutes }).toUTC().toISO() : null,
   });
   await schedulePost(item.id, dt.toUTC().toISO());
-  await ctx.reply(`⏰ Scheduled for ${dt.toFormat('yyyy-MM-dd HH:mm')} (${tz}).`, homeReplyKeyboard());
+  const names = await channelNames(draft.channelIds);
+  await ctx.reply(`⏰ Scheduled for ${dt.toFormat('yyyy-MM-dd HH:mm')} (${tz}) to ${names}.`, homeReplyKeyboard());
   ctx.session = {};
 }
 
-async function saveAsTemplate(ctx, name) {
+async function saveAsTemplate(ctx, name, { silent = false } = {}) {
   const draft = ctx.session.draft;
   await savedItems.create({
     kind: 'template', name, status: 'draft', mediaType: draft.mediaType, mediaItems: draft.mediaItems,
     caption: draft.caption, entities: draft.entities, buttons: draft.buttons, options: draft.options, channelIds: [],
   });
-  await ctx.reply(`💾 Saved as template: "${name}"`, homeReplyKeyboard());
-  ctx.session = {};
+  if (silent) {
+    await ctx.reply(`💾 Saved as template: "${name}" — now sending...`);
+  } else {
+    await ctx.reply(`💾 Saved as template: "${name}"`, homeReplyKeyboard());
+    ctx.session = {};
+  }
 }
 
 async function registerHandlers(bot) {
@@ -285,9 +339,24 @@ async function registerHandlers(bot) {
     const draft = ctx.session.draft;
     if (!draft) return;
     if (val === 'next') {
-      if (draft.channelIds.length === 0) return ctx.answerCbQuery('Pick at least one channel first.');
-      ctx.session.step = 'media_type';
-      await ctx.reply('What kind of post is this?', mediaTypeKeyboard());
+      if (draft.channelIds.length === 0) {
+        // v1.1.0 FIX (related to #6): this used to be an answerCbQuery()
+        // toast, which is easy to miss and reads as "nothing happened."
+        // A real chat message can't be missed.
+        await ctx.reply('⚠️ Pick at least one channel first (tap a channel name to check it), then Continue.');
+        return;
+      }
+      const action = ctx.session.finishAction;
+      if (action === 'send_template') {
+        ctx.session.step = 'awaiting_template_name_then_send';
+        await ctx.reply('Name this template (it\'ll be saved, then the post sends):');
+      } else if (action === 'schedule') {
+        ctx.session.step = 'awaiting_schedule_time';
+        const tz = await settingsModel.get('timezone', 'UTC');
+        await ctx.reply(`Send the date/time to send this (format: yyyy-MM-dd HH:mm), in ${tz}.`);
+      } else {
+        await doSend(ctx, { undoWindow: true });
+      }
       return;
     }
     const idx = draft.channelIds.indexOf(val);
@@ -305,6 +374,35 @@ async function registerHandlers(bot) {
     ctx.session.draft.mediaType = type;
     if (type === 'media_group') ctx.session.draft.mediaItems = [];
     await askForContent(ctx);
+  });
+
+  // v1.1.0 enhancement: reuse previously-sent media instead of re-uploading.
+  bot.action('cp:library', async (ctx) => {
+    await ctx.answerCbQuery();
+    const items = await mediaLibrary.list({ limit: 8 });
+    if (items.length === 0) {
+      await ctx.reply('📚 Your library is empty — media gets remembered here automatically the first time you actually send it.', mediaTypeKeyboard());
+      return;
+    }
+    const icon = { photo: '🖼', video: '🎥', document: '📄' };
+    const rows = items.map((i) => [Markup.button.callback(`${icon[i.media_type] || '📎'} ${i.label || i.media_type}`, `cp:libpick:${i.id}`)]);
+    rows.push([Markup.button.callback('❌ Cancel', 'nav:cancel')]);
+    await ctx.reply('Pick media from your library:', Markup.inlineKeyboard(rows));
+  });
+
+  bot.action(/^cp:libpick:(\d+)$/, async (ctx) => {
+    const id = parseInt(ctx.match[1], 10);
+    await ctx.answerCbQuery();
+    const item = await mediaLibrary.findById(id);
+    if (!item) {
+      await ctx.reply('That item is no longer available.');
+      return;
+    }
+    const draft = ctx.session.draft;
+    draft.mediaType = item.media_type;
+    draft.mediaItems = [{ file_id: item.file_id, type: item.media_type }];
+    ctx.session.step = 'caption_for_media';
+    await ctx.reply('Add a caption (or send /skip):');
   });
 
   bot.action('cp:media:done', async (ctx) => {
@@ -358,7 +456,9 @@ async function registerHandlers(bot) {
     const style = ctx.match[1];
     await ctx.answerCbQuery();
     const draft = ctx.session.draft;
-    const btn = { text: ctx.session.buttonDraft.text, url: ctx.session.buttonDraft.url };
+    const btn = { text: ctx.session.buttonDraft.text };
+    if (ctx.session.buttonDraft.note) btn.note = ctx.session.buttonDraft.note;
+    else btn.url = ctx.session.buttonDraft.url;
     if (style !== 'default') btn.style = style;
     if (draft.buttons.length === 0) draft.buttons.push([]);
     draft.buttons[draft.buttons.length - 1].push(btn);
@@ -379,16 +479,45 @@ async function registerHandlers(bot) {
     await ctx.reply('Name this template:');
   });
 
-  bot.action('cp:schedule', async (ctx) => {
+  bot.action('cp:save:draft', async (ctx) => {
     await ctx.answerCbQuery();
-    ctx.session.step = 'awaiting_schedule_time';
-    const tz = await settingsModel.get('timezone', 'UTC');
-    await ctx.reply(`Send the date/time to send this (format: yyyy-MM-dd HH:mm), in ${tz}.`);
+    const draft = ctx.session.draft;
+    await savedItems.create({
+      kind: 'post', status: 'draft', channelIds: [], mediaType: draft.mediaType, mediaItems: draft.mediaItems,
+      caption: draft.caption, entities: draft.entities, buttons: draft.buttons, options: draft.options,
+    });
+    await ctx.reply('📝 Saved as a draft (no channel, not sent) — find it later in 📜 History.', homeReplyKeyboard());
+    ctx.session = {};
   });
 
-  bot.action('cp:send', async (ctx) => {
+  // v1.1.0 (#4): channel selection now lives here, at the end, gated by
+  // which finishing action was requested (send / schedule / send+template).
+  bot.action(/^cp:finish:(send|schedule|send_template)$/, async (ctx) => {
+    const action = ctx.match[1];
     await ctx.answerCbQuery();
-    await doSend(ctx, { undoWindow: true });
+    const channels = await channelsModel.list();
+    if (channels.length === 0) {
+      await ctx.reply('No channels registered yet. Go to 📡 Channels first to add one, then come back and finish this post.');
+      return;
+    }
+    ctx.session.finishAction = action;
+    ctx.session.step = 'select_channels_finish';
+    await ctx.reply('Select target channel(s):', channelPickerKeyboard(channels, ctx.session.draft.channelIds));
+  });
+
+  bot.action(/^cp:poll:toggle:(.+)$/, async (ctx) => {
+    const field = ctx.match[1];
+    await ctx.answerCbQuery();
+    const draft = ctx.session.draft;
+    draft.options.poll[field] = !draft.options.poll[field];
+    try {
+      await ctx.editMessageReplyMarkup(pollOptionsKeyboard(draft).reply_markup);
+    } catch (_) {}
+  });
+
+  bot.action('cp:poll:continue', async (ctx) => {
+    await ctx.answerCbQuery();
+    await goToPreview(ctx);
   });
 
   bot.action(/^cp:undo:(\d+)$/, async (ctx) => {
@@ -399,17 +528,10 @@ async function registerHandlers(bot) {
     ctx.session = {};
   });
 
-  bot.action('cp:back:channels', async (ctx) => {
-    await ctx.answerCbQuery();
-    ctx.session.step = 'select_channels';
-    const channels = await channelsModel.list();
-    await ctx.reply('Select target channel(s):', channelPickerKeyboard(channels, ctx.session.draft.channelIds));
-  });
-
   bot.action('cp:back:content', async (ctx) => {
     await ctx.answerCbQuery();
     await askForContent(ctx);
   });
 }
 
-module.exports = { enter, handleText, handleMedia, registerHandlers };
+module.exports = { enter, handleText, handleMedia, registerHandlers, goToPreview };

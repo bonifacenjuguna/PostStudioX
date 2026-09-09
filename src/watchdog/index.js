@@ -14,6 +14,7 @@ const watchdogLog = require('../db/models/watchdogLog');
 const settingsModel = require('../db/models/settings');
 const emergencyStop = require('../services/emergencyStop');
 const { scheduledPostQueue, autoDeleteQueue } = require('../queue/queues');
+const { isEffectivelyAdmin, describeIssue } = require('../services/channelPermissions');
 
 const bot = new Telegraf(config.botToken());
 const OWNER_ID = config.ownerId();
@@ -101,18 +102,20 @@ async function checkChannels() {
   for (const ch of channels) {
     try {
       const member = await bot.telegram.getChatMember(ch.chat_id, me.id);
-      const isAdmin = ['administrator', 'creator'].includes(member.status);
+      const isAdmin = isEffectivelyAdmin(member);
       if (!isAdmin && ch.is_admin) {
         // Just transitioned to broken - pause its scheduled posts and alert.
-        await channelsModel.setAdminStatus(ch.chat_id, false, `status: ${member.status}`);
+        await channelsModel.setAdminStatus(ch.chat_id, false, describeIssue(member));
         await watchdogLog.record({ level: 'warning', category: 'channel', message: `Lost admin rights in ${ch.title || ch.chat_id}`, selfHealed: true });
-        await alertOwner(
-          `📡 ${ch.title || ch.chat_id} lost admin rights.`,
-          [
-            [Markup.button.callback('🔄 Retry Check', `wd:recheck:${ch.chat_id}`)],
-            [Markup.button.callback('🗑 Remove Channel', `wd:removechannel:${ch.chat_id}`)],
-          ]
-        );
+        if (!ch.muted) {
+          await alertOwner(
+            `📡 ${ch.title || ch.chat_id} lost admin rights.`,
+            [
+              [Markup.button.callback('🔄 Retry Check', `wd:recheck:${ch.chat_id}`)],
+              [Markup.button.callback('🗑 Remove Channel', `wd:removechannel:${ch.chat_id}`)],
+            ]
+          );
+        }
       } else if (isAdmin && !ch.is_admin) {
         await channelsModel.setAdminStatus(ch.chat_id, true, null);
       }

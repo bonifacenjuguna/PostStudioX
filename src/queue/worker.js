@@ -12,6 +12,7 @@ const channelsModel = require('../db/models/channels');
 const { publishSavedItem } = require('../services/publisher');
 const { scheduleAutoDelete } = require('./queues');
 const watchdogLog = require('../db/models/watchdogLog');
+const { isEffectivelyAdmin, describeIssue } = require('../services/channelPermissions');
 
 // Visibility only - this process crashing and letting Railway restart it
 // is the intended recovery path (see file header comment), but a silent
@@ -49,8 +50,8 @@ const scheduledPostWorker = new Worker(
     for (const chatId of item.channel_ids) {
       try {
         const member = await bot.telegram.getChatMember(chatId, (await bot.telegram.getMe()).id);
-        if (!['administrator', 'creator'].includes(member.status)) {
-          throw new Error('not an admin');
+        if (!isEffectivelyAdmin(member)) {
+          throw new Error(describeIssue(member) || 'not an admin');
         }
       } catch (err) {
         await channelsModel.setAdminStatus(chatId, false, err.message);
@@ -63,7 +64,7 @@ const scheduledPostWorker = new Worker(
       }
     }
 
-    const results = await publishSavedItem(bot, item);
+    const results = await publishSavedItem(bot.telegram, item);
 
     if (item.auto_delete_at) {
       const refs = results.flatMap((r) => r.messages.map((m) => ({ chat_id: r.chatId, message_id: m.message_id })));
@@ -107,7 +108,7 @@ const autoRepostWorker = new Worker(
       buttons: item.buttons,
       options: item.options,
     });
-    await publishSavedItem(bot, { ...clone, channel_ids: [targetChannelId] });
+    await publishSavedItem(bot.telegram, { ...clone, channel_ids: [targetChannelId] });
   },
   { connection, concurrency: 1 }
 );

@@ -164,15 +164,6 @@ silently glossed over:
   selection — this is a real platform constraint, not a shortcut). Precise
   per-substring formatting requires typing the shorthand syntax directly
   (`**this part only**`), which *does* work at any position.
-- **Duplicate detection** (`dedupeChecker.js`) is available as a service but
-  isn't yet wired into the pre-send validation gate automatically — the
-  building blocks (word-overlap similarity, caption hashing) are implemented
-  and ready to call from wherever you'd like the warning to surface.
-- **Media library (`file_id` reuse)** has a working data model
-  (`media_library` table + model) but isn't yet wired into the New Post flow
-  as a "pick from library" step — media is currently re-sent fresh each
-  time via Telegram's own `file_id` you already have from a previous
-  message, which is cheap, but there's no library *browser* UI yet.
 - **Recipes** (saved settings bundles independent of content) have schema
   support (`kind = 'recipe'`) and export/import support, but no dedicated
   compose-time UI yet for picking a recipe at the start of New Post.
@@ -181,6 +172,11 @@ silently glossed over:
   UI (deciding *when* to trigger it) isn't built — currently it'd need to be
   triggered by inserting a job manually or extending the watchdog/stats
   poller to call it based on a rule you define.
+
+As of v1.1.0: duplicate detection is wired into New Post as a non-blocking
+warning at the preview step, and the media library now has a real "📚 From
+Library" browser in New Post (media you actually send gets remembered there
+automatically).
 
 None of the above are bugs — they're the honest edges of a very large scope,
 included so you know exactly what's fully wired versus what has the

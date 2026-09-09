@@ -5,41 +5,58 @@ const TOPICS = {
     title: '🧭 How this bot works',
     body:
       "This bot only responds to you. Almost everything is done through *buttons* — two kinds:\n\n" +
-      '• *Reply keyboard* (bottom bar, below where you type) — main navigation: New Post, Channels, Templates, etc. It changes depending on what screen you\'re on.\n' +
+      '• *Reply keyboard* (bottom bar, below where you type) — main navigation: New Post, Channels, Templates, etc. It changes depending on what screen you\'re on, and always includes 🛑 STOP ALL.\n' +
       '• *Inline buttons* (attached to a specific message) — choices tied to that exact message: picking a channel, confirming a send, editing a caption. Tapping one usually edits that same message rather than sending a new one, to keep the chat clean.\n\n' +
       'Only /start, /help, /status are typed commands you\'ll normally use — everything else, tap don\'t type.',
   },
   creating_posts: {
     title: '📝 Creating & sending posts',
     body:
-      'Tap 📝 New Post, pick a channel, pick a media type (photo/video/document/text/poll/album), send the content, then add formatting/buttons. ' +
-      'You\'ll always see a full preview before anything goes out, with Send Now, Schedule, or Save as Template options.',
+      'Tap 📝 New Post, pick a media type (photo/video/document/text/poll/album — or 📚 From Library to reuse media you\'ve sent before), send the content, add formatting/buttons, then preview it.\n\n' +
+      'Channel selection happens *last*, only once you choose how to finish: 🚀 Send Now, ⏰ Schedule, 💾 Save as Template, 📝 Save as Draft (no channel yet), or 🚀+💾 Send & Save as Template. ' +
+      'That way you never have to commit to a channel before you\'ve even decided what the post is for.',
   },
   formatting_buttons: {
     title: '🎨 Formatting & buttons',
     body:
-      'The formatting toolbar lets you apply Bold, Italic, Underline, Strikethrough, Spoiler, Code, Code Block, Hyperlink, Blockquote, Expandable Blockquote.\n\n' +
-      'Buttons you attach can be URL buttons, colored (Primary/Danger/Success), edited or deleted anytime from History. ' +
+      'The formatting toolbar lets you apply Bold, Italic, Underline, Strikethrough, Spoiler, Code, Link, and Blockquote.\n\n' +
+      'Buttons you attach can be:\n' +
+      '• *Link buttons* — open a URL\n' +
+      '• *Note buttons* — type `NOTE: your message` instead of a URL when asked; tapping shows a popup instead of opening a link (good for extra context, credits, disclaimers)\n\n' +
+      'Both kinds can be colored (Primary/Danger/Success), edited or deleted anytime from an existing post\'s edit menu. ' +
       'Want links gone entirely? Use 🚫 Remove All Links, or 🧹 Strip Links on an existing post.',
+  },
+  polls: {
+    title: '📊 Polls',
+    body:
+      'Send a question, then comma-separated answers (at least 2). Then choose: Anonymous (on by default), Allow multiple answers, and Quiz mode (marks one answer correct). ' +
+      'The preview shows a real, tappable poll — not just the question text.',
   },
   scheduling: {
     title: '⏰ Scheduling & auto-delete',
     body:
-      'Schedule a post for later — pick a time (your timezone from Settings applies). Pending posts live under ⏰ Scheduled, ' +
+      'Schedule a post for later — pick a time (your timezone from Settings applies), always in the future. Pending posts live under ⏰ Scheduled, ' +
       'editable or cancelable anytime before they fire.\n\n' +
       'Auto-delete works two ways: channel posts can self-delete after a set time, and the bot\'s own chat messages to you clean up automatically too.',
   },
   channels: {
     title: '📡 Channels & permissions',
     body:
-      'Register channels under 📡 Channels — the bot needs to be an admin with post rights there. ' +
-      'If it ever loses those rights, you\'ll get an alert rather than silent failures.',
+      'Register a channel under 📡 Channels → ➕ Add Channel, any of: tap "Choose a Channel" to pick it natively, forward a message from it, send its @username, a t.me/ link, or its numeric chat ID. ' +
+      'The bot needs to already be an admin there with "Post Messages" rights.\n\n' +
+      '🔄 Re-check Rights shows exactly which permissions the bot has or is missing (post, edit, delete, pin, invite, etc.), not just a yes/no. ' +
+      'If it ever loses rights, you\'ll get an alert — unless you\'ve muted that specific channel with 🔕 Mute Alerts.',
   },
-  templates_recipes: {
-    title: '🗂 Templates & recipes',
+  templates_folders: {
+    title: '🗂 Templates & folders',
     body:
-      'Any post can be saved as a template (its format) via 💾 Save as Template, or filed into a 📁 Folder for later reuse. ' +
-      'A "recipe" is a saved bundle of settings (channels + toggles) independent of content.',
+      'Any post can be saved as a template (its format, no channels attached) via 💾 Save as Template. Tapping ▶️ Use on a template jumps straight to its preview — no need to redo content or media type.\n\n' +
+      '📁 Folders group templates/posts for your own organization; items can be moved between folders, or used directly as a new post from inside a folder.',
+  },
+  media_library: {
+    title: '📚 Media Library',
+    body:
+      'Photos, videos, and documents you actually send get remembered automatically. Next time, pick 📚 From Library at the media-type step in New Post instead of re-uploading.',
   },
   stats: {
     title: '📊 Stats: views & reactions',
@@ -56,13 +73,19 @@ const TOPICS = {
   emergency_stop: {
     title: '🛑 Emergency Stop',
     body:
-      'Available anytime, even mid-flow — instantly pauses all scheduled posts, auto-deletes, and auto-reposts. ' +
-      'Use it if something looks wrong and you need everything to freeze immediately.',
+      'The 🛑 STOP ALL button lives on the reply keyboard at the bottom of the chat — always visible, no matter how deep in a menu or flow you are. ' +
+      'Tapping it instantly pauses all scheduled posts, auto-deletes, and auto-reposts. Resume from ⚙️ Settings → 🛡 Watchdog when you\'re ready.',
+  },
+  navigation: {
+    title: '🧭 Navigation tips',
+    body:
+      'Lists longer than a few pages (Templates, History, Scheduled) show a 🔢 Jump to page button once there are more than 4 pages — tap it, then send a page number.\n\n' +
+      'Any inline "❌ Cancel" or "🏠 Home" button gets you out of a flow without losing anything already saved.',
   },
   settings: {
     title: '⚙️ Settings explained',
     body:
-      'Defaults, timezone, notification preferences, button colors, auto-delete defaults, storage management, and watchdog controls all live here.',
+      'Defaults, timezone, notification preferences, button colors, auto-delete defaults, storage management (including manually purging old trash), and watchdog controls all live here.',
   },
 };
 

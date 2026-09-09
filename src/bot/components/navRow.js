@@ -22,29 +22,37 @@ function homeOnlyRow() {
   return [Markup.button.callback('🏠 Home', 'nav:home')];
 }
 
+// Appends an inline "🛑 STOP ALL" row to a keyboard - used on a handful of
+// higher-stakes inline menus (Settings, Channel view) in addition to the
+// always-visible reply-keyboard button below, so it's reachable both ways.
 function withEmergencyStop(rows) {
-  // Emergency Stop is appended to *every* inline keyboard bot-wide so it's
-  // reachable regardless of navigation depth, per the locked navigation contract.
   return [...rows, [Markup.button.callback('🛑 STOP ALL', 'nav:emergency_stop')]];
 }
+
+// v1.1.0 FIX (#6): Emergency Stop used to only exist as an inline button
+// that was never actually attached to any keyboard (dead promise - see
+// withEmergencyStop above, which nothing called). Putting it on the
+// *persistent reply keyboard* instead is strictly better: unlike an inline
+// button, the reply keyboard stays visible and tappable no matter how deep
+// in a flow you are or how old the message it was attached to is.
 
 // Home reply keyboard - the persistent bottom bar shown outside any wizard.
 function homeReplyKeyboard() {
   return Markup.keyboard([
     ['📝 New Post', '📡 Channels', '🗂 Templates'],
     ['📁 My Folders', '⏰ Scheduled', '📜 History'],
-    ['⚙️ Settings'],
+    ['⚙️ Settings', '🛑 STOP ALL'],
   ]).resize();
 }
 
 // Reply keyboard shown while inside any wizard/flow.
 function flowReplyKeyboard() {
-  return Markup.keyboard([['⬅️ Back', '❌ Cancel']]).resize();
+  return Markup.keyboard([['⬅️ Back', '❌ Cancel'], ['🛑 STOP ALL']]).resize();
 }
 
 // Reply keyboard shown inside a sub-screen (Settings, Templates list, etc.)
 function subScreenReplyKeyboard() {
-  return Markup.keyboard([['⬅️ Back to Home']]).resize();
+  return Markup.keyboard([['⬅️ Back to Home'], ['🛑 STOP ALL']]).resize();
 }
 
 module.exports = {

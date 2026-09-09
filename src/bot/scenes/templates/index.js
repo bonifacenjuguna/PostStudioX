@@ -1,7 +1,7 @@
 const { Markup } = require('telegraf');
 const savedItems = require('../../../db/models/savedItems');
 const { paginationRow, PAGE_SIZE, offsetFor } = require('../../components/pagination');
-const { subScreenReplyKeyboard, homeReplyKeyboard } = require('../../components/navRow');
+const { subScreenReplyKeyboard, flowReplyKeyboard } = require('../../components/navRow');
 
 async function enter(ctx, page = 0) {
   ctx.session = { scene: 'templates', page };
@@ -42,26 +42,26 @@ async function registerHandlers(bot, scenes) {
     );
   });
 
+  // v1.1.0 FIX (#9): previously this re-asked media type and re-ran the
+  // whole compose wizard even though the template already has finished
+  // content - now it loads the draft and jumps straight to the preview /
+  // finish screen (same one New Post lands on), where channels get picked
+  // only if you choose to Send or Schedule.
   bot.action(/^tpl:use:(\d+)$/, async (ctx) => {
     const id = parseInt(ctx.match[1], 10);
     await ctx.answerCbQuery();
     const t = await savedItems.findById(id);
+    if (!t) return ctx.reply('Template not found.');
     ctx.session = {
       scene: 'create-post',
-      step: 'select_channels',
       draft: {
         channelIds: [], mediaType: t.media_type, mediaItems: t.media_items || [],
         caption: t.caption || '', entities: t.entities || [], buttons: t.buttons || [], options: t.options || {},
       },
     };
-    const channelsModel = require('../../../db/models/channels');
-    const channels = await channelsModel.list();
-    const { flowReplyKeyboard } = require('../../components/navRow');
-    await ctx.reply('Using template — pick target channel(s):', flowReplyKeyboard());
-    const rows = channels.map((c) => [Markup.button.callback(`⬜ ${c.title || c.chat_id}`, `cp:chan:${c.chat_id}`)]);
-    rows.push([Markup.button.callback('➡️ Next', 'cp:chan:next')]);
-    rows.push([Markup.button.callback('❌ Cancel', 'nav:cancel')]);
-    await ctx.reply('Select target channel(s):', Markup.inlineKeyboard(rows));
+    await ctx.reply('Using template — here\'s the preview:', flowReplyKeyboard());
+    const createPost = require('../create-post');
+    await createPost.goToPreview(ctx);
   });
 
   bot.action(/^tpl:edit:(\d+)$/, async (ctx) => {

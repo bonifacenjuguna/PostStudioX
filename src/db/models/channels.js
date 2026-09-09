@@ -32,4 +32,12 @@ async function setAdminStatus(chatId, isAdmin, issue = null) {
   );
 }
 
-module.exports = { list, findByChatId, add, remove, setAdminStatus };
+async function setMuted(chatId, muted) {
+  const res = await db.query(
+    'UPDATE channels SET muted = $2 WHERE chat_id = $1 RETURNING *',
+    [String(chatId), muted]
+  );
+  return res.rows[0];
+}
+
+module.exports = { list, findByChatId, add, remove, setAdminStatus, setMuted };

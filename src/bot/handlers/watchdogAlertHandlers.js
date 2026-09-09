@@ -2,6 +2,7 @@ const channelsModel = require('../../db/models/channels');
 const settingsModel = require('../../db/models/settings');
 const watchdogLog = require('../../db/models/watchdogLog');
 const { scheduledPostQueue } = require('../../queue/queues');
+const { isEffectivelyAdmin, describeIssue, formatPermissions } = require('../../services/channelPermissions');
 
 // Handles taps on buttons attached to watchdog alert DMs. The watchdog
 // service itself only ever sends messages (via bot.telegram.sendMessage) -
@@ -14,9 +15,9 @@ function registerWatchdogAlertHandlers(bot) {
     try {
       const me = await ctx.telegram.getMe();
       const member = await ctx.telegram.getChatMember(chatId, me.id);
-      const isAdmin = ['administrator', 'creator'].includes(member.status);
-      await channelsModel.setAdminStatus(chatId, isAdmin, isAdmin ? null : `status: ${member.status}`);
-      await ctx.reply(isAdmin ? '🟢 Admin rights confirmed.' : '🔴 Still not an admin.');
+      const isAdmin = isEffectivelyAdmin(member);
+      await channelsModel.setAdminStatus(chatId, isAdmin, isAdmin ? null : describeIssue(member));
+      await ctx.reply(formatPermissions(member));
     } catch (err) {
       await ctx.reply(`🔴 Check failed: ${err.message}`);
     }

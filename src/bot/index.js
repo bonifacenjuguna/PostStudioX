@@ -14,6 +14,7 @@ const { registerWatchdogAlertHandlers } = require('./handlers/watchdogAlertHandl
 const { registerReactionHandlers } = require('./handlers/reactionHandlers');
 const { registerMainMenu } = require('./handlers/mainMenu');
 const { registerSceneRouter } = require('./sceneRouter');
+const { registerPaginationJump } = require('./components/pagination');
 
 const channels = require('./scenes/channels');
 const createPost = require('./scenes/create-post');
@@ -43,6 +44,16 @@ function buildBot() {
   registerNavHandlers(bot);
   registerWatchdogAlertHandlers(bot);
   registerReactionHandlers(bot);
+
+  // v1.1.0 (#6): "🔢 Jump to page" on Templates/History/Scheduled was
+  // rendered but had no handler anywhere - wired up here, registered before
+  // the scene router so a pending jump always takes priority over whatever
+  // scene happens to be active.
+  registerPaginationJump(bot, {
+    tpl: (ctx, page) => templates.enter(ctx, page),
+    sch: (ctx, page) => scheduled.enter(ctx, page),
+    hist: (ctx, page) => history.enter(ctx, page, ctx.session.statusFilter || null),
+  });
 
   const scenes = {
     channels,

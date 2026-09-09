@@ -6,13 +6,10 @@ const emergencyStop = require('../../../services/emergencyStop');
 const exportImport = require('../../../services/exportImport');
 const db = require('../../../db/pool');
 const { safeRedis } = require('../../../queue/redisClient');
-const { subScreenReplyKeyboard } = require('../../components/navRow');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+const { subScreenReplyKeyboard, withEmergencyStop } = require('../../components/navRow');
 
 function menuKeyboard() {
-  return Markup.inlineKeyboard([
+  return Markup.inlineKeyboard(withEmergencyStop([
     [Markup.button.callback('🎛 Defaults', 'set:defaults')],
     [Markup.button.callback('🕐 Timezone', 'set:timezone')],
     [Markup.button.callback('🔔 Notifications', 'set:notifications')],
@@ -23,7 +20,7 @@ function menuKeyboard() {
     [Markup.button.callback('💾 Backup/Export', 'set:backup')],
     [Markup.button.callback('ℹ️ About', 'set:about')],
     [Markup.button.callback('🏠 Home', 'nav:home')],
-  ]);
+  ]));
 }
 
 async function enter(ctx) {
@@ -139,7 +136,7 @@ async function registerHandlers(bot) {
     await ctx.reply(text, Markup.inlineKeyboard([
       [Markup.button.callback('🧹 Clean Old Versions', 'set:cleanversions')],
       [Markup.button.callback('🧹 Clean Old Watchdog Logs', 'set:cleanlogs')],
-      [Markup.button.callback('🧹 Clear Temp Files', 'set:cleantemp')],
+      [Markup.button.callback('🧹 Purge Old Trash Now', 'set:cleantrash')],
       [Markup.button.callback('🏠 Home', 'nav:home')],
     ]));
   });
@@ -158,18 +155,18 @@ async function registerHandlers(bot) {
     await ctx.reply(`🧹 Removed ${n} old watchdog log entries.`);
   });
 
-  bot.action('set:cleantemp', async (ctx) => {
+  // v1.1.0 FIX (#7): this used to be "🧹 Clear Temp Files", which cleared a
+  // local temp directory that nothing in this bot ever writes to (it never
+  // downloads media locally - everything is a Telegram file_id reference).
+  // It would always report "Cleared 0 temp file(s)" - a real button with no
+  // real effect. Repurposed into an actually useful action: force-purge
+  // trashed posts past their retention window right now, instead of only
+  // on whatever automatic schedule runs it.
+  bot.action('set:cleantrash', async (ctx) => {
     await ctx.answerCbQuery('Cleaning...');
-    const tmpDir = path.join(os.tmpdir(), 'bot-media-cache');
-    let count = 0;
-    if (fs.existsSync(tmpDir)) {
-      const files = fs.readdirSync(tmpDir);
-      for (const f of files) {
-        fs.unlinkSync(path.join(tmpDir, f));
-        count += 1;
-      }
-    }
-    await ctx.reply(`🧹 Cleared ${count} temp file(s).`);
+    const cleanup = await settingsModel.get('cleanup_rules', {});
+    const n = await savedItems.purgeOldTrash(cleanup.keep_trash_days || 30);
+    await ctx.reply(`🧹 Permanently removed ${n} old trashed post(s).`);
   });
 
   bot.action('set:watchdog', async (ctx) => {

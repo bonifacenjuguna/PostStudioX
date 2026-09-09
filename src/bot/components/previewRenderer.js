@@ -31,6 +31,19 @@ async function sendPreview(ctx, draft) {
     if (keyboard) return ctx.reply('👆 Buttons that will accompany this album:', { reply_markup: keyboard });
     return;
   }
+  // v1.1.0 FIX (#8): polls previously had no branch here at all and fell
+  // through to the plain-text case below, which just echoed the poll
+  // question as a normal message - not a real preview of what a poll post
+  // actually looks like (answers, anonymous/multi/quiz settings).
+  if (draft.mediaType === 'poll' && draft.options?.poll) {
+    const p = draft.options.poll;
+    return ctx.replyWithPoll(p.question, p.answers, {
+      is_anonymous: p.isAnonymous !== false,
+      allows_multiple_answers: !!p.allowsMultiple,
+      type: p.quizMode ? 'quiz' : 'regular',
+      correct_option_id: p.quizMode ? (p.correctOptionId || 0) : undefined,
+    });
+  }
   // text
   return ctx.reply(draft.caption || '(empty message)', { entities: opts.entities, reply_markup: keyboard });
 }
