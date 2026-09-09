@@ -134,14 +134,34 @@ async function main() {
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
 
-  // Graceful shutdown - finish in-flight work, close connections cleanly,
-  // rather than being hard-killed by Railway's SIGTERM.
+  // ─────────────────────────────────────────────────────────────────────
+  // ROOT CAUSE (v6 - confirmed via getWebhookInfo, url was "" with updates
+  // stuck in pending_update_count): every previous round patched code that
+  // never actually ran. Nothing was hanging - the webhook registration
+  // itself was getting wiped out.
+  //
+  // Railway sends SIGTERM to the OLD container as part of every routine
+  // redeploy, after the NEW container is already up and has registered
+  // this same webhook URL in its own app.listen callback. This handler
+  // used to call bot.telegram.deleteWebhook() on that SIGTERM - which
+  // doesn't care which container registered the webhook, it just deletes
+  // it. So the sequence on basically every deploy was: new container
+  // registers -> old container's shutdown fires -> deleteWebhook() wipes
+  // out what the new container just set. Telegram then has nowhere to
+  // deliver updates (pending_update_count climbs, url goes empty), no
+  // request ever reaches this app again, and there's nothing to log
+  // because nothing here ever runs. Only a *second* deploy would
+  // temporarily fix it (new registration), until the next SIGTERM deleted
+  // it again.
+  //
+  // The webhook URL doesn't change between deploys - there's no reason to
+  // tear it down on a routine restart. deleteWebhook is for an actual
+  // decommission (switching to polling, retiring the bot), which never
+  // happens in normal operation, so it's simply not called here anymore.
+  // ─────────────────────────────────────────────────────────────────────
   const shutdown = async () => {
     console.log('[boot] SIGTERM received, shutting down gracefully...');
     server.close();
-    try {
-      await bot.telegram.deleteWebhook();
-    } catch (_) { /* best-effort */ }
     const { closePool } = require('./db/pool');
     await closePool();
     process.exit(0);

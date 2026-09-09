@@ -1,6 +1,6 @@
 {
   "name": "telegram-posting-bot",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Owner-only Telegram bot for composing, scheduling, and managing posts to Telegram channels.",
   "main": "src/index.js",
   "type": "commonjs",
