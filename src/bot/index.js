@@ -84,7 +84,7 @@ function buildBot() {
     watchdogLog
       .record({ level: 'warning', category: 'bot', message: `Unhandled error: ${err.message}` })
       .catch(() => {});
-    ctx.reply('🔴 Something went wrong handling that. The error has been logged.').catch(() => {});
+    ctx.reply(`🔴 Something went wrong: ${err.message}\n\n(Logged to watchdog events - Settings → Watchdog → Recent Events.)`).catch(() => {});
   });
 
   return bot;

@@ -9,6 +9,7 @@ const { sendPreview } = require('../../components/previewRenderer');
 const { publishSavedItem } = require('../../../services/publisher');
 const { schedulePost, scheduleAutoDelete } = require('../../../queue/queues');
 const { flowReplyKeyboard, homeReplyKeyboard, backCancelRow } = require('../../components/navRow');
+const { clearSession } = require('../../middleware/session');
 const { DateTime } = require('luxon');
 const settingsModel = require('../../../db/models/settings');
 
@@ -137,6 +138,11 @@ async function handleText(ctx) {
   const step = ctx.session.step;
   const draft = ctx.session.draft;
   const text = ctx.message.text;
+  if (!draft) {
+    await ctx.reply('⏱ This New Post session has expired or already finished. Start a new one with 📝 New Post.', homeReplyKeyboard());
+    ctx.session = {};
+    return;
+  }
 
   if (step === 'awaiting_content' && (draft.mediaType === 'text' || draft.mediaType === 'poll')) {
     if (draft.mediaType === 'poll' && !draft.options.pollQuestion) {
@@ -245,7 +251,7 @@ async function handleText(ctx) {
 async function handleMedia(ctx) {
   const step = ctx.session.step;
   const draft = ctx.session.draft;
-  if (step !== 'awaiting_content') return;
+  if (step !== 'awaiting_content' || !draft) return;
 
   if (draft.mediaType === 'photo' && ctx.message.photo) {
     const largest = ctx.message.photo[ctx.message.photo.length - 1];
@@ -360,7 +366,7 @@ async function doSend(ctx, { undoWindow = true } = {}) {
           await scheduleAutoDelete(item.id, at, (refreshed.current_message_refs || []));
         }
         await ctx.telegram.editMessageText(msg.chat.id, msg.message_id, undefined, `✅ Posted to ${names}`);
-        ctx.session = {};
+        await clearSession(ctx);
       } catch (err) {
         await ctx.telegram.sendMessage(msg.chat.id, `🔴 Send failed: ${err.message}`);
       }
@@ -411,7 +417,24 @@ async function saveAsTemplate(ctx, name, { silent = false } = {}) {
 }
 
 async function registerHandlers(bot) {
-  bot.action(/^cp:chan:(.+)$/, async (ctx) => {
+  // v1.2.0 FIX: every cp:* handler below reads ctx.session.draft. If the
+  // session had already moved on (post already sent, flow abandoned and
+  // reset by starting a new one, 3-day session TTL expired) and the person
+  // taps a button from an old, still-visible message, draft is gone and
+  // the handler would throw a raw TypeError trying to read a property off
+  // undefined - which is exactly what produced the generic "Something
+  // went wrong" error. Every cp:* action now checks first and fails with
+  // an actual explanation instead.
+  const requireDraft = async (ctx, next) => {
+    if (!ctx.session?.draft) {
+      await ctx.answerCbQuery('This step has expired', { show_alert: true });
+      try { await ctx.editMessageText('⏱ This New Post session has expired or already finished. Start a new one with 📝 New Post.'); } catch (_) {}
+      return;
+    }
+    return next();
+  };
+
+  bot.action(/^cp:chan:(.+)$/, requireDraft, async (ctx) => {
     const val = ctx.match[1];
     await ctx.answerCbQuery();
     const draft = ctx.session.draft;
@@ -443,7 +466,7 @@ async function registerHandlers(bot) {
     } catch (_) {}
   });
 
-  bot.action(/^cp:type:(.+)$/, async (ctx) => {
+  bot.action(/^cp:type:(.+)$/, requireDraft, async (ctx) => {
     const type = ctx.match[1];
     await ctx.answerCbQuery();
     ctx.session.draft.mediaType = type;
@@ -451,7 +474,7 @@ async function registerHandlers(bot) {
     await askForContent(ctx);
   });
 
-  bot.action('cp:library', async (ctx) => {
+  bot.action('cp:library', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     const items = await mediaLibrary.list({ limit: 8 });
     if (items.length === 0) {
@@ -464,7 +487,7 @@ async function registerHandlers(bot) {
     await showStep(ctx, `${header(1)}\n\nPick media from your library:`, Markup.inlineKeyboard(rows));
   });
 
-  bot.action(/^cp:libpick:(\d+)$/, async (ctx) => {
+  bot.action(/^cp:libpick:(\d+)$/, requireDraft, async (ctx) => {
     const id = parseInt(ctx.match[1], 10);
     await ctx.answerCbQuery();
     const item = await mediaLibrary.findById(id);
@@ -479,13 +502,13 @@ async function registerHandlers(bot) {
     await showStep(ctx, `${header(3)}\n\nAdd a caption (or send /skip):`, Markup.inlineKeyboard([backCancelRow('cp:back:mediatype')]));
   });
 
-  bot.action('cp:media:done', async (ctx) => {
+  bot.action('cp:media:done', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     ctx.session.step = 'caption_for_media';
     await showStep(ctx, `${header(3)}\n\nAdd a caption for the album (or /skip):`, Markup.inlineKeyboard([backCancelRow('cp:back:content')]));
   });
 
-  bot.action(/^cp:fmt:(.+)$/, async (ctx) => {
+  bot.action(/^cp:fmt:(.+)$/, requireDraft, async (ctx) => {
     const action = ctx.match[1];
     await ctx.answerCbQuery();
     const draft = ctx.session.draft;
@@ -519,13 +542,13 @@ async function registerHandlers(bot) {
     }
   });
 
-  bot.action('cp:buttons:add', async (ctx) => {
+  bot.action('cp:buttons:add', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     ctx.session.step = 'awaiting_button_text';
     await showStep(ctx, `${header(3)}\n\nSend the button label text.`, Markup.inlineKeyboard([backCancelRow('cp:back:formatting')]));
   });
 
-  bot.action(/^cp:btnstyle:(.+)$/, async (ctx) => {
+  bot.action(/^cp:btnstyle:(.+)$/, requireDraft, async (ctx) => {
     const style = ctx.match[1];
     await ctx.answerCbQuery();
     const draft = ctx.session.draft;
@@ -540,19 +563,19 @@ async function registerHandlers(bot) {
     await showStep(ctx, `${header(3)}\n\n🔘 Button added (${colorLabel(style)}).`, formattingKeyboard());
   });
 
-  bot.action('cp:edit:caption', async (ctx) => {
+  bot.action('cp:edit:caption', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     ctx.session.step = 'caption_for_media';
     await showStep(ctx, `${header(3)}\n\nSend the new caption text (shorthand formatting supported):`, Markup.inlineKeyboard([backCancelRow('cp:back:formatting')]));
   });
 
-  bot.action('cp:save:template', async (ctx) => {
+  bot.action('cp:save:template', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     ctx.session.step = 'awaiting_template_name';
     await showStep(ctx, `${header(5)}\n\nName this template:`, Markup.inlineKeyboard([backCancelRow('cp:finish:backpreview')]));
   });
 
-  bot.action('cp:save:draft', async (ctx) => {
+  bot.action('cp:save:draft', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     const draft = ctx.session.draft;
     await savedItems.create({
@@ -563,7 +586,7 @@ async function registerHandlers(bot) {
     ctx.session = {};
   });
 
-  bot.action(/^cp:finish:(send|schedule|send_template)$/, async (ctx) => {
+  bot.action(/^cp:finish:(send|schedule|send_template)$/, requireDraft, async (ctx) => {
     const action = ctx.match[1];
     await ctx.answerCbQuery();
     const channels = await channelsModel.list();
@@ -580,13 +603,13 @@ async function registerHandlers(bot) {
   // returns to the Preview screen with the draft fully intact, instead of
   // the old behavior where the only way out was "❌ Cancel" (which nuked
   // the whole post).
-  bot.action('cp:finish:backpreview', async (ctx) => {
+  bot.action('cp:finish:backpreview', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     delete ctx.session.finishAction;
     await backToPreviewPanel(ctx);
   });
 
-  bot.action(/^cp:poll:toggle:(.+)$/, async (ctx) => {
+  bot.action(/^cp:poll:toggle:(.+)$/, requireDraft, async (ctx) => {
     const field = ctx.match[1];
     await ctx.answerCbQuery();
     const draft = ctx.session.draft;
@@ -596,7 +619,7 @@ async function registerHandlers(bot) {
     } catch (_) {}
   });
 
-  bot.action('cp:poll:continue', async (ctx) => {
+  bot.action('cp:poll:continue', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     await goToPreview(ctx);
   });
@@ -609,17 +632,17 @@ async function registerHandlers(bot) {
     ctx.session = {};
   });
 
-  bot.action('cp:back:mediatype', async (ctx) => {
+  bot.action('cp:back:mediatype', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     await showMediaTypeStep(ctx);
   });
 
-  bot.action('cp:back:content', async (ctx) => {
+  bot.action('cp:back:content', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     await askForContent(ctx);
   });
 
-  bot.action('cp:back:formatting', async (ctx) => {
+  bot.action('cp:back:formatting', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     ctx.session.step = 'formatting';
     await showStep(ctx, `${header(3)}\n\nAdd formatting, links, or buttons — or tap Done.`, formattingKeyboard());

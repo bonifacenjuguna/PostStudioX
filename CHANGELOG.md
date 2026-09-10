@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.2.1 — batch 3 (bug reports from live use)
+
+### Fixed
+- **"🔴 Something went wrong" when sending.** Root cause: after a timed
+  "Send Now" actually completed, the code cleared the session with
+  `ctx.session = {}` *inside a `setTimeout`* - which runs long after the
+  original request already finished and the session middleware already
+  saved state to Redis. That assignment was a no-op against real storage,
+  so the session stayed stuck on `send_grace_period` indefinitely. Tapping
+  any New Post button afterward (especially an old one still sitting in
+  the chat) hit a handler that assumed a draft existed, and crashed with a
+  raw TypeError trying to read a property off `undefined`. Fixed at the
+  root - the timed callback now calls the real `clearSession()` - and
+  defensively everywhere else: every New Post action handler, plus
+  `handleText`/`handleMedia`, now check the draft actually exists first
+  and reply with a clear "this session expired, start a new one" message
+  instead of crashing if it doesn't.
+- **`/skip` didn't work.** `sceneRouter.js` treated *any* text starting
+  with `/` as an escape hatch out of the current flow and never handed it
+  to the active scene - so `/skip` during a caption prompt was silently
+  dropped before the code that actually understands `/skip` ever saw it.
+  Narrowed that escape hatch to the three real global commands
+  (`/start`, `/help`, `/status`); everything else, including in-flow
+  pseudo-commands like `/skip`, now reaches the scene.
+- **Generic error messages were actually hiding the bug.** The global
+  error handler said "Something went wrong. The error has been logged."
+  with no detail - unhelpful on a single-owner bot where the owner is also
+  the one who has to debug it. It now shows the real error message
+  directly in the chat reply.
+
 ## v1.2.0 — batch 2
 
 ### Fixed

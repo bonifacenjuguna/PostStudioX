@@ -4,10 +4,18 @@
 // ours is Redis-backed with a Postgres durability mirror, so we drive
 // dispatch manually here instead.
 
+// Only these are real, globally-registered commands that should always
+// escape whatever flow you're in. Everything else starting with "/" -
+// including in-flow pseudo-commands like /skip - must still reach the
+// active scene, or it's silently swallowed (this was the /skip bug: it
+// was being treated as an unknown command and dropped before ever
+// reaching the scene that knows what to do with it).
+const GLOBAL_COMMANDS = /^\/(start|help|status)(\s|$)/i;
+
 function registerSceneRouter(bot, scenes) {
   bot.on('text', async (ctx, next) => {
     if (!ctx.session?.scene) return next();
-    if (ctx.message.text?.startsWith('/')) return next(); // let commands through
+    if (GLOBAL_COMMANDS.test(ctx.message.text || '')) return next();
 
     const scene = scenes[toCamel(ctx.session.scene)];
     if (scene?.handleText) {
