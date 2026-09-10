@@ -32,12 +32,29 @@ async function setAdminStatus(chatId, isAdmin, issue = null) {
   );
 }
 
-async function setMuted(chatId, muted) {
-  const res = await db.query(
-    'UPDATE channels SET muted = $2 WHERE chat_id = $1 RETURNING *',
-    [String(chatId), muted]
+// Stores the full granular permission breakdown alongside the simple
+// is_admin flag, so screens can render the detailed report without an
+// extra live Telegram API call every time - only on explicit recheck.
+async function setPermissions(chatId, permissionsResult) {
+  await db.query(
+    `UPDATE channels
+     SET is_admin = $2, admin_issue = $3, permissions = $4, last_checked_at = now()
+     WHERE chat_id = $1`,
+    [
+      String(chatId),
+      permissionsResult.ok,
+      permissionsResult.reason,
+      JSON.stringify(permissionsResult.permissions || {}),
+    ]
   );
-  return res.rows[0];
 }
 
-module.exports = { list, findByChatId, add, remove, setAdminStatus, setMuted };
+async function setMuted(chatId, muted) {
+  await db.query('UPDATE channels SET muted = $2 WHERE chat_id = $1', [String(chatId), muted]);
+}
+
+async function setLabel(chatId, label) {
+  await db.query('UPDATE channels SET label = $2 WHERE chat_id = $1', [String(chatId), label || null]);
+}
+
+module.exports = { list, findByChatId, add, remove, setAdminStatus, setPermissions, setMuted, setLabel };

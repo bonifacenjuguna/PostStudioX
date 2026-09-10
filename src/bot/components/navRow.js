@@ -22,37 +22,56 @@ function homeOnlyRow() {
   return [Markup.button.callback('🏠 Home', 'nav:home')];
 }
 
-// Appends an inline "🛑 STOP ALL" row to a keyboard - used on a handful of
-// higher-stakes inline menus (Settings, Channel view) in addition to the
-// always-visible reply-keyboard button below, so it's reachable both ways.
 function withEmergencyStop(rows) {
+  // Emergency Stop is appended to every top-level screen's inline keyboard
+  // (list/menu screens for each section) so it's reachable no matter how
+  // deep you are, without needing to back out to Home first.
   return [...rows, [Markup.button.callback('🛑 STOP ALL', 'nav:emergency_stop')]];
 }
 
-// v1.1.0 FIX (#6): Emergency Stop used to only exist as an inline button
-// that was never actually attached to any keyboard (dead promise - see
-// withEmergencyStop above, which nothing called). Putting it on the
-// *persistent reply keyboard* instead is strictly better: unlike an inline
-// button, the reply keyboard stays visible and tappable no matter how deep
-// in a flow you are or how old the message it was attached to is.
+// Lets you jump sideways to another section without returning Home first.
+// Rendered as a compact 3-per-row grid of the sections other than the one
+// you're currently in. `currentSection` is skipped so you're never shown a
+// button back to the screen you're already on.
+const SECTIONS = [
+  ['channels', '📡', 'Channels'],
+  ['createPost', '📝', 'New Post'],
+  ['templates', '🗂', 'Templates'],
+  ['folders', '📁', 'Folders'],
+  ['scheduled', '⏰', 'Scheduled'],
+  ['history', '📜', 'History'],
+  ['settings', '⚙️', 'Settings'],
+];
+
+function quickNavRow(currentSection = null) {
+  const buttons = SECTIONS.filter(([key]) => key !== currentSection).map(([key, emoji, label]) =>
+    Markup.button.callback(`${emoji} ${label}`, `nav:goto:${key}`)
+  );
+  // Chunk into rows of 3 so it doesn't dominate the screen.
+  const rows = [];
+  for (let i = 0; i < buttons.length; i += 3) {
+    rows.push(buttons.slice(i, i + 3));
+  }
+  return rows;
+}
 
 // Home reply keyboard - the persistent bottom bar shown outside any wizard.
 function homeReplyKeyboard() {
   return Markup.keyboard([
     ['📝 New Post', '📡 Channels', '🗂 Templates'],
     ['📁 My Folders', '⏰ Scheduled', '📜 History'],
-    ['⚙️ Settings', '🛑 STOP ALL'],
+    ['⚙️ Settings'],
   ]).resize();
 }
 
 // Reply keyboard shown while inside any wizard/flow.
 function flowReplyKeyboard() {
-  return Markup.keyboard([['⬅️ Back', '❌ Cancel'], ['🛑 STOP ALL']]).resize();
+  return Markup.keyboard([['⬅️ Back', '❌ Cancel']]).resize();
 }
 
 // Reply keyboard shown inside a sub-screen (Settings, Templates list, etc.)
 function subScreenReplyKeyboard() {
-  return Markup.keyboard([['⬅️ Back to Home'], ['🛑 STOP ALL']]).resize();
+  return Markup.keyboard([['⬅️ Back to Home']]).resize();
 }
 
 module.exports = {
@@ -60,6 +79,7 @@ module.exports = {
   backHomeRow,
   homeOnlyRow,
   withEmergencyStop,
+  quickNavRow,
   homeReplyKeyboard,
   flowReplyKeyboard,
   subScreenReplyKeyboard,

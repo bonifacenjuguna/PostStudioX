@@ -1,38 +1,29 @@
 const { Markup } = require('telegraf');
 const folders = require('../../../db/models/folders');
-const { subScreenReplyKeyboard } = require('../../components/navRow');
+const savedItems = require('../../../db/models/savedItems');
+const { subScreenReplyKeyboard, quickNavRow, withEmergencyStop } = require('../../components/navRow');
 
 async function enter(ctx) {
   ctx.session = { scene: 'folders' };
   const list = await folders.list();
   const rows = list.map((f) => [Markup.button.callback(`📂 ${f.name} (${f.item_count})`, `fld:view:${f.id}`)]);
   rows.push([Markup.button.callback('➕ New Folder', 'fld:new')]);
-  rows.push([Markup.button.callback('🏠 Home', 'nav:home')]);
+  rows.push(...quickNavRow('folders'));
   await ctx.reply('📁 My Folders', subScreenReplyKeyboard());
-  await ctx.reply(list.length ? 'Pick a folder:' : 'No folders yet.', Markup.inlineKeyboard(rows));
+  await ctx.reply(list.length ? 'Pick a folder:' : 'No folders yet.', Markup.inlineKeyboard(withEmergencyStop(rows)));
 }
 
 async function handleText(ctx) {
   if (ctx.session.step === 'awaiting_folder_name') {
-    const name = ctx.message.text.trim();
-    if (!name) {
-      await ctx.reply('Folder name can\'t be empty — send a name:');
-      return;
-    }
-    await folders.create(name);
-    ctx.session = { scene: 'folders' };
-    await ctx.reply(`📂 Folder "${name}" created.`);
+    await folders.create(ctx.message.text.trim());
+    ctx.session.step = null;
+    await ctx.reply('📂 Folder created.');
     await enter(ctx);
     return;
   }
   if (ctx.session.step === 'awaiting_rename') {
-    const name = ctx.message.text.trim();
-    if (!name) {
-      await ctx.reply('Folder name can\'t be empty — send a name:');
-      return;
-    }
-    await folders.rename(ctx.session.renamingFolderId, name);
-    ctx.session = { scene: 'folders' };
+    await folders.rename(ctx.session.renamingFolderId, ctx.message.text.trim());
+    ctx.session.step = null;
     await ctx.reply('✏️ Folder renamed.');
     await enter(ctx);
   }
@@ -41,11 +32,7 @@ async function handleText(ctx) {
 async function registerHandlers(bot) {
   bot.action('fld:new', async (ctx) => {
     await ctx.answerCbQuery();
-    // v1.1.0 FIX (#10): a full reset (rather than mutating ctx.session.step
-    // in place) guarantees `scene` is definitely 'folders' when the text
-    // handler in sceneRouter looks it up next, no matter what state the
-    // session happened to be in beforehand.
-    ctx.session = { scene: 'folders', step: 'awaiting_folder_name' };
+    ctx.session.step = 'awaiting_folder_name';
     await ctx.reply('Name the new folder:');
   });
 
@@ -53,15 +40,14 @@ async function registerHandlers(bot) {
     const id = parseInt(ctx.match[1], 10);
     await ctx.answerCbQuery();
     const folder = await folders.findById(id);
-    if (!folder) return ctx.reply('That folder no longer exists.');
+    if (!folder) return ctx.reply('Folder not found.');
     const items = await folders.itemsIn(id);
     const rows = items.map((i) => [
       Markup.button.callback(`${i.kind === 'template' ? '🗂' : '📝'} ${i.name || i.caption?.slice(0, 30) || '(untitled)'}`, `fld:item:${id}:${i.id}`),
     ]);
     rows.push([Markup.button.callback('✏️ Rename', `fld:rename:${id}`), Markup.button.callback('🗑 Delete Folder', `fld:delete:${id}`)]);
     rows.push([Markup.button.callback('⬅️ Back to Folders', 'fld:list')]);
-    rows.push([Markup.button.callback('🏠 Home', 'nav:home')]);
-    await ctx.reply(`📂 ${folder.name}${items.length ? '' : '\n\n(empty)'}`, Markup.inlineKeyboard(rows));
+    await ctx.reply(`📂 ${folder.name}`, Markup.inlineKeyboard(withEmergencyStop(rows)));
   });
 
   bot.action('fld:list', async (ctx) => {
@@ -81,31 +67,34 @@ async function registerHandlers(bot) {
     ]));
   });
 
-  // v1.1.0 FIX: "🔀 Move to another folder" above had no handler at all in
-  // the original code - tapping it did nothing. Implemented for real here.
+  // Previously "🔀 Move to another folder" had no handler registered
+  // anywhere - a dead tap. This also fixes a second problem the old button
+  // had even in principle: it only carried the itemId, with no source
+  // folder to remove the item FROM, so a correct move wasn't even possible
+  // without this extra hop.
   bot.action(/^fld:move:(\d+):(\d+)$/, async (ctx) => {
-    const fromFolderId = parseInt(ctx.match[1], 10);
+    const sourceFolderId = parseInt(ctx.match[1], 10);
     const itemId = parseInt(ctx.match[2], 10);
     await ctx.answerCbQuery();
     const list = await folders.list();
-    const others = list.filter((f) => f.id !== fromFolderId);
-    if (others.length === 0) {
-      await ctx.reply('No other folders to move this to yet — create one first from 📁 My Folders.');
+    const options = list.filter((f) => f.id !== sourceFolderId);
+    if (options.length === 0) {
+      await ctx.reply('No other folders to move it to — create one first from 📁 My Folders.');
       return;
     }
-    const rows = others.map((f) => [Markup.button.callback(`📂 ${f.name}`, `fld:moveto:${fromFolderId}:${itemId}:${f.id}`)]);
+    const rows = options.map((f) => [Markup.button.callback(`📂 ${f.name}`, `fld:moveto:${sourceFolderId}:${f.id}:${itemId}`)]);
     rows.push([Markup.button.callback('❌ Cancel', 'nav:cancel')]);
     await ctx.reply('Move to which folder?', Markup.inlineKeyboard(rows));
   });
 
   bot.action(/^fld:moveto:(\d+):(\d+):(\d+)$/, async (ctx) => {
-    const fromFolderId = parseInt(ctx.match[1], 10);
-    const itemId = parseInt(ctx.match[2], 10);
-    const toFolderId = parseInt(ctx.match[3], 10);
+    const sourceFolderId = parseInt(ctx.match[1], 10);
+    const targetFolderId = parseInt(ctx.match[2], 10);
+    const itemId = parseInt(ctx.match[3], 10);
     await ctx.answerCbQuery('Moved');
-    await folders.addItem(toFolderId, itemId);
-    await folders.removeItem(fromFolderId, itemId);
-    try { await ctx.editMessageText('🔀 Moved to the other folder.'); } catch (_) {}
+    await folders.addItem(targetFolderId, itemId);
+    await folders.removeItem(sourceFolderId, itemId);
+    try { await ctx.editMessageText('🔀 Moved to the new folder.'); } catch (_) {}
   });
 
   bot.action(/^fld:removeitem:(\d+):(\d+)$/, async (ctx) => {

@@ -16,13 +16,8 @@ async function list({ limit = 8, offset = 0 } = {}) {
   return res.rows;
 }
 
-async function findById(id) {
-  const res = await db.query('SELECT * FROM media_library WHERE id = $1', [id]);
-  return res.rows[0] || null;
-}
-
 async function remove(id) {
   await db.query('DELETE FROM media_library WHERE id = $1', [id]);
 }
 
-module.exports = { add, list, findById, remove };
+module.exports = { add, list, remove };

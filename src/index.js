@@ -3,6 +3,7 @@ const config = require('./config/env');
 const { buildBot } = require('./bot');
 const { runMigrations } = require('./db/migrate');
 const { safeRedis } = require('./queue/redisClient');
+const { ALLOWED_UPDATES } = require('./config/allowedUpdates');
 
 // ─────────────────────────────────────────────────────────────────────────
 // ROOT CAUSE (v3 - the actual one): `bot.handleUpdate(req.body, res)` below
@@ -97,10 +98,7 @@ async function main() {
     try {
       await bot.telegram.setWebhook(`${config.webhookUrl()}${secretPath}`, {
         secret_token: config.webhookSecretToken(),
-        allowed_updates: [
-          'message', 'edited_message', 'callback_query', 'channel_post',
-          'edited_channel_post', 'message_reaction', 'message_reaction_count',
-        ],
+        allowed_updates: ALLOWED_UPDATES,
       });
       console.log('[boot] Webhook registered with Telegram.');
     } catch (err) {

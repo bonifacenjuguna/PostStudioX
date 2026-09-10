@@ -34,4 +34,12 @@ async function allTrackedRefs() {
   return res.rows;
 }
 
-module.exports = { upsertMessageRef, updateViews, updateReactions, forSavedItem, allTrackedRefs };
+async function existsForMessage(chatId, messageId) {
+  const res = await db.query(
+    'SELECT 1 FROM stats WHERE chat_id = $1 AND message_id = $2',
+    [String(chatId), messageId]
+  );
+  return res.rows.length > 0;
+}
+
+module.exports = { upsertMessageRef, updateViews, updateReactions, forSavedItem, allTrackedRefs, existsForMessage };

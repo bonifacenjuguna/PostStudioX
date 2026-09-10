@@ -1,155 +1,214 @@
 const { Markup } = require('telegraf');
 const channelsModel = require('../../../db/models/channels');
-const { subScreenReplyKeyboard } = require('../../components/navRow');
-const { isEffectivelyAdmin, describeIssue, formatPermissions } = require('../../../services/channelPermissions');
+const { subScreenReplyKeyboard, withEmergencyStop, quickNavRow } = require('../../components/navRow');
+const { checkChannelPermissions, formatPermissionReport } = require('../../../services/channelPermissions');
 
-const CHAT_REQUEST_ID = 9001; // arbitrary constant id for the one request_chat button we use
+// Fixed request_id: this bot only ever has one "pick a channel" request in
+// flight at a time (single-owner, one flow at a time), so there's no need
+// to generate/track a unique id per attempt.
+const ADD_CHANNEL_REQUEST_ID = 501;
 
 function listKeyboard(channels) {
   const rows = channels.map((c) => [
-    Markup.button.callback(`${c.is_admin ? '🟢' : '🔴'}${c.muted ? ' 🔕' : ''} ${c.title || c.chat_id}`, `channels:view:${c.chat_id}`),
+    Markup.button.callback(
+      `${c.is_admin ? '🟢' : '🔴'}${c.muted ? ' 🔕' : ''} ${c.label || c.title || c.chat_id}`,
+      `channels:view:${c.chat_id}`
+    ),
   ]);
   rows.push([Markup.button.callback('➕ Add Channel', 'channels:add')]);
-  return Markup.inlineKeyboard(rows);
+  return Markup.inlineKeyboard(withEmergencyStop(rows));
 }
 
-// Reply keyboard used only while "waiting to register a channel" - offers
-// Telegram's native chat picker (filtered to channels the owner can grant
-// the bot access to) alongside the existing text-based methods.
-function addChannelReplyKeyboard() {
-  return Markup.keyboard([
-    [{ text: '📡 Choose a Channel', request_chat: { request_id: CHAT_REQUEST_ID, chat_is_channel: true, bot_is_member: false } }],
-    ['⬅️ Back to Home'],
-  ]).resize();
+function requestChatKeyboard() {
+  // Raw Bot API shape (KeyboardButtonRequestChat) built by hand rather than
+  // through a Telegraf helper, since this environment can't npm-verify which
+  // helper signature the installed Telegraf version exposes - the JSON
+  // Telegram itself expects is the one thing guaranteed stable.
+  //
+  // bot_is_member + bot_administrator_rights.can_post_messages means the
+  // native picker Telegram shows is PRE-FILTERED to only channels where
+  // this bot is already an admin that can post - exactly the "pre-select
+  // the actual permissions needed" behavior asked for, enforced by Telegram
+  // itself rather than by us re-checking after the fact.
+  return {
+    reply_markup: {
+      keyboard: [
+        [
+          {
+            text: '📡 Choose a Channel',
+            request_chat: {
+              request_id: ADD_CHANNEL_REQUEST_ID,
+              chat_is_channel: true,
+              bot_is_member: true,
+              bot_administrator_rights: { can_post_messages: true },
+            },
+          },
+        ],
+        ['❌ Cancel'],
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: true,
+    },
+  };
 }
 
 async function enter(ctx) {
-  ctx.session = { scene: 'channels' };
   const channels = await channelsModel.list();
   await ctx.reply(
     `📡 Channels (${channels.length} registered)\n\n` +
-      'Registered channels show 🟢 (can post) or 🔴 (an issue) plus 🔕 if alerts are muted for it.',
+      'Register a channel by: forwarding a message from it, sending its @username, its numeric chat ID, its t.me link - or just tap "Add Channel" to pick from a list.',
     subScreenReplyKeyboard()
   );
   await ctx.reply(channels.length ? 'Registered channels:' : 'No channels registered yet.', listKeyboard(channels));
 }
 
-function extractChannelRef(text) {
-  const trimmed = text.trim();
-  // t.me/xxxx or https://t.me/xxxx or @xxxx
-  const linkMatch = trimmed.match(/^(?:https?:\/\/)?t\.me\/(?:c\/)?([A-Za-z0-9_]+)/i);
-  if (linkMatch) return { username: linkMatch[1] };
-  if (trimmed.startsWith('@')) return { username: trimmed.slice(1) };
-  if (/^-?\d+$/.test(trimmed)) return { chatId: trimmed };
+// Accepts: forwarded message, @username, numeric chat ID, or a t.me link
+// (https://t.me/name, t.me/name, or @name copied as a link). Previously
+// only the first three worked - a pasted channel link was silently ignored.
+function extractChannelRef(ctx) {
+  const text = ctx.message.text?.trim();
+  const forwardChat = ctx.message.forward_from_chat;
+
+  if (forwardChat) {
+    return { chatId: forwardChat.id };
+  }
+  if (!text) return null;
+
+  if (text.startsWith('@')) {
+    return { chatId: text };
+  }
+  if (/^-?\d+$/.test(text)) {
+    return { chatId: text };
+  }
+
+  const linkMatch = text.match(/^(?:https?:\/\/)?t\.me\/([a-zA-Z0-9_]{5,})\/?$/i);
+  if (linkMatch) {
+    return { chatId: `@${linkMatch[1]}` };
+  }
+
   return null;
 }
 
-async function registerChannelFromChatId(ctx, chatIdOrUsername) {
-  const target = typeof chatIdOrUsername === 'string' && chatIdOrUsername.startsWith('@')
-    ? chatIdOrUsername
-    : chatIdOrUsername;
+async function registerChannel(ctx, chatId) {
+  const permResult = await checkChannelPermissions(ctx.telegram, chatId);
+  if (!permResult.isAdmin) {
+    await ctx.reply("⚠️ I'm in that chat but not an admin there yet. Promote me to admin with post permissions, then try again.");
+    return;
+  }
+  if (!permResult.ok) {
+    await ctx.reply(`⚠️ I'm an admin there, but the "Post messages" permission is off, so I still can't send anything:\n\n${formatPermissionReport(permResult)}`);
+    return;
+  }
+  const chat = await ctx.telegram.getChat(chatId);
+  const saved = await channelsModel.add({ chatId: chat.id, title: chat.title, username: chat.username });
+  await channelsModel.setPermissions(saved.chat_id, permResult);
+  await ctx.reply(`✅ Registered: ${saved.title || saved.chat_id}\n\n${formatPermissionReport(permResult)}`, subScreenReplyKeyboard());
+  await enter(ctx);
+}
+
+async function handleText(ctx) {
+  if (ctx.session.step === 'awaiting_label') {
+    const chatId = ctx.session.labelingChatId;
+    const raw = ctx.message.text.trim();
+    await channelsModel.setLabel(chatId, raw === '-' ? null : raw);
+    ctx.session.step = null;
+    await ctx.reply(raw === '-' ? '✏️ Label cleared.' : '✏️ Label saved.');
+    await renderChannelView(ctx, chatId);
+    return;
+  }
+
+  const ref = extractChannelRef(ctx);
+  if (!ref) return; // not a channel reference - ignore, other handlers may process it
+
   try {
-    const me = await ctx.telegram.getMe();
-    const member = await ctx.telegram.getChatMember(target, me.id);
-    if (!isEffectivelyAdmin(member)) {
-      await ctx.reply(
-        `⚠️ I'm in that chat, but ${describeIssue(member)}.\n\nPromote me to admin with "Post Messages" rights, then try again.`
-      );
-      return;
-    }
-    const chat = await ctx.telegram.getChat(target);
-    const saved = await channelsModel.add({ chatId: chat.id, title: chat.title, username: chat.username });
-    await ctx.reply(`✅ Registered: ${saved.title || saved.chat_id}`, subScreenReplyKeyboard());
-    await enter(ctx);
+    await registerChannel(ctx, ref.chatId);
   } catch (err) {
     await ctx.reply(`🔴 Couldn't verify that channel: ${err.message}\n\nMake sure the bot has been added to it first.`);
   }
 }
 
-async function handleText(ctx) {
-  const text = ctx.message.text?.trim();
-  const forwardChat = ctx.message.forward_from_chat;
-
-  if (forwardChat) {
-    await registerChannelFromChatId(ctx, forwardChat.id);
-    return;
-  }
-
-  const ref = text ? extractChannelRef(text) : null;
-  if (!ref) return; // not a channel reference - ignore, other handlers may process it
-
-  await registerChannelFromChatId(ctx, ref.username ? `@${ref.username}` : ref.chatId);
-}
-
-// Handles Telegram's native "chat picker" result (request_chat button tap).
-// Arrives as an ordinary message with a `chat_shared` field, not text - so
-// it needs its own listener rather than going through handleText.
+// Handles the result of the native chat picker (see requestChatKeyboard).
+// Registered generically on 'message' in bot/index.js since chat_shared
+// rides on a plain message, not its own update type.
 async function handleChatShared(ctx) {
   const shared = ctx.message.chat_shared;
-  if (!shared || shared.request_id !== CHAT_REQUEST_ID) return;
-  await registerChannelFromChatId(ctx, shared.chat_id);
+  if (!shared || shared.request_id !== ADD_CHANNEL_REQUEST_ID) return false;
+
+  await ctx.reply('Checking that channel...', subScreenReplyKeyboard());
+  try {
+    await registerChannel(ctx, shared.chat_id);
+  } catch (err) {
+    await ctx.reply(`🔴 Couldn't verify that channel: ${err.message}`, subScreenReplyKeyboard());
+  }
+  return true;
 }
 
 function channelViewKeyboard(channel) {
-  return Markup.inlineKeyboard([
+  const rows = [
     [Markup.button.callback('🔄 Re-check Rights', `channels:recheck:${channel.chat_id}`)],
-    [Markup.button.callback(channel.muted ? '🔔 Unmute Alerts' : '🔕 Mute Alerts', `channels:mute:${channel.chat_id}`)],
+    [Markup.button.callback('📨 Send Test Post', `channels:test:${channel.chat_id}`)],
+    [
+      Markup.button.callback(channel.muted ? '🔔 Unmute Alerts' : '🔕 Mute Alerts', `channels:mute:${channel.chat_id}`),
+      Markup.button.callback('✏️ Rename Label', `channels:label:${channel.chat_id}`),
+    ],
     [Markup.button.callback('🗑 Remove Channel', `channels:remove:${channel.chat_id}`)],
-    [Markup.button.callback('🏠 Home', 'nav:home')],
-  ]);
+  ];
+  rows.push(...quickNavRow('channels'));
+  return Markup.inlineKeyboard(withEmergencyStop(rows));
+}
+
+async function renderChannelView(ctx, chatId, { edit = false } = {}) {
+  const channel = await channelsModel.findByChatId(chatId);
+  if (!channel) return ctx.reply('Channel not found.');
+
+  const status = channel.is_admin ? '🟢 Can post' : `🔴 Issue: ${channel.admin_issue || 'unknown'}`;
+  const text =
+    `📡 ${channel.label || channel.title || channel.chat_id}\n` +
+    `${status}${channel.muted ? '\n🔕 Alerts muted for this channel' : ''}\n` +
+    `Last checked: ${channel.last_checked_at ? new Date(channel.last_checked_at).toLocaleString() : 'never'}`;
+
+  const keyboard = channelViewKeyboard(channel);
+  if (edit) {
+    try {
+      await ctx.editMessageText(text, keyboard);
+      return;
+    } catch (_) { /* fall through to a fresh message */ }
+  }
+  await ctx.reply(text, keyboard);
 }
 
 async function registerHandlers(bot) {
   bot.action('channels:add', async (ctx) => {
     await ctx.answerCbQuery();
     await ctx.reply(
-      'Register a channel any of these ways:\n\n' +
-        '• Tap "📡 Choose a Channel" below to pick it from your chat list\n' +
-        '• Forward any message from the channel\n' +
-        '• Send its @username\n' +
-        '• Send a t.me/ link\n' +
-        '• Send its numeric chat ID\n\n' +
-        'The bot must already be added to the channel as admin with "Post Messages" rights.',
-      addChannelReplyKeyboard()
+      'Tap below to pick from channels where I\'m already an admin who can post - or just paste a @username, numeric chat ID, t.me link, or forward a message from the channel.',
+      requestChatKeyboard()
     );
-  });
-
-  // Native chat picker result - not text, needs its own generic message
-  // listener. Always calls next() when it's not a chat_shared update so it
-  // never interferes with any other message handler in the chain.
-  bot.on('message', async (ctx, next) => {
-    if (ctx.message?.chat_shared) {
-      await handleChatShared(ctx);
-      return;
-    }
-    return next();
   });
 
   bot.action(/^channels:view:(.+)$/, async (ctx) => {
     const chatId = ctx.match[1];
     await ctx.answerCbQuery();
-    const channel = await channelsModel.findByChatId(chatId);
-    if (!channel) return ctx.reply('Channel not found.');
-    const status = channel.is_admin ? '🟢 Can post' : `🔴 Issue: ${channel.admin_issue || 'unknown'}`;
-    await ctx.reply(
-      `📡 ${channel.title || channel.chat_id}\n${status}${channel.muted ? '\n🔕 Alerts muted' : ''}\n` +
-        `Last checked: ${channel.last_checked_at ? new Date(channel.last_checked_at).toLocaleString() : 'never'}`,
-      channelViewKeyboard(channel)
-    );
+    await renderChannelView(ctx, chatId);
   });
 
   bot.action(/^channels:recheck:(.+)$/, async (ctx) => {
     const chatId = ctx.match[1];
     await ctx.answerCbQuery('Checking...');
+    const result = await checkChannelPermissions(ctx.telegram, chatId);
+    await channelsModel.setPermissions(chatId, result);
+    await ctx.reply(formatPermissionReport(result));
+    await renderChannelView(ctx, chatId);
+  });
+
+  bot.action(/^channels:test:(.+)$/, async (ctx) => {
+    const chatId = ctx.match[1];
+    await ctx.answerCbQuery('Sending...');
     try {
-      const me = await ctx.telegram.getMe();
-      const member = await ctx.telegram.getChatMember(chatId, me.id);
-      const isAdmin = isEffectivelyAdmin(member);
-      await channelsModel.setAdminStatus(chatId, isAdmin, isAdmin ? null : describeIssue(member));
-      await ctx.reply(formatPermissions(member));
+      const sent = await ctx.telegram.sendMessage(chatId, '✅ Test post from Post Studio X - this confirms the bot can send here. You can delete this message.');
+      await ctx.reply(`🟢 Test post delivered (message ${sent.message_id}).`);
     } catch (err) {
-      await channelsModel.setAdminStatus(chatId, false, err.message);
-      await ctx.reply(`🔴 Check failed: ${err.message}`);
+      await ctx.reply(`🔴 Send failed: ${err.message}\n\nRun "Re-check Rights" to see exactly which permission is missing.`);
     }
   });
 
@@ -157,16 +216,16 @@ async function registerHandlers(bot) {
     const chatId = ctx.match[1];
     await ctx.answerCbQuery();
     const channel = await channelsModel.findByChatId(chatId);
-    if (!channel) return ctx.reply('Channel not found.');
-    const updated = await channelsModel.setMuted(chatId, !channel.muted);
-    try {
-      await ctx.editMessageText(
-        `📡 ${updated.title || updated.chat_id}\n${updated.is_admin ? '🟢 Can post' : '🔴 Issue: ' + (updated.admin_issue || 'unknown')}${updated.muted ? '\n🔕 Alerts muted' : ''}`,
-        channelViewKeyboard(updated)
-      );
-    } catch (_) {
-      await ctx.reply(updated.muted ? '🔕 Alerts muted for this channel.' : '🔔 Alerts unmuted for this channel.');
-    }
+    if (!channel) return;
+    await channelsModel.setMuted(chatId, !channel.muted);
+    await renderChannelView(ctx, chatId, { edit: true });
+  });
+
+  bot.action(/^channels:label:(.+)$/, async (ctx) => {
+    const chatId = ctx.match[1];
+    await ctx.answerCbQuery();
+    ctx.session = { scene: 'channels', step: 'awaiting_label', labelingChatId: chatId };
+    await ctx.reply('Send a custom label for this channel (this is just for your own reference in the bot - it won\'t rename the actual Telegram channel). Send "-" to clear it.');
   });
 
   bot.action(/^channels:remove:(.+)$/, async (ctx) => {
@@ -189,4 +248,4 @@ async function registerHandlers(bot) {
   });
 }
 
-module.exports = { enter, handleText, registerHandlers };
+module.exports = { enter, handleText, handleChatShared, registerHandlers };

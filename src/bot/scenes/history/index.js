@@ -2,8 +2,8 @@ const { Markup } = require('telegraf');
 const savedItems = require('../../../db/models/savedItems');
 const statsModel = require('../../../db/models/stats');
 const db = require('../../../db/pool');
-const { paginationRow, PAGE_SIZE, offsetFor } = require('../../components/pagination');
-const { subScreenReplyKeyboard } = require('../../components/navRow');
+const { paginationRow, PAGE_SIZE, offsetFor, parseJumpTarget } = require('../../components/pagination');
+const { subScreenReplyKeyboard, quickNavRow, withEmergencyStop } = require('../../components/navRow');
 
 async function enter(ctx, page = 0, statusFilter = null) {
   ctx.session = { scene: 'history', page, statusFilter };
@@ -31,8 +31,20 @@ async function enter(ctx, page = 0, statusFilter = null) {
     Markup.button.callback('🗑 Trashed', 'hist:filter:trashed'),
     Markup.button.callback('🔄 All', 'hist:filter:all'),
   ]);
-  rows.push([Markup.button.callback('🏠 Home', 'nav:home')]);
-  await ctx.reply('Posts:', Markup.inlineKeyboard(rows));
+  rows.push(...quickNavRow('history'));
+  await ctx.reply('Posts:', Markup.inlineKeyboard(withEmergencyStop(rows)));
+}
+
+async function handleText(ctx) {
+  if (ctx.session.step !== 'awaiting_page_jump' || ctx.session.jumpPrefix !== 'hist') return;
+  const statusFilter = ctx.session.statusFilter;
+  const total = statusFilter ? await savedItems.countByKind('post', statusFilter) : await countAllPosts();
+  const { ok, page, totalPages } = parseJumpTarget(ctx.message.text, total);
+  if (!ok) {
+    await ctx.reply(`Enter a number between 1 and ${totalPages}.`);
+    return;
+  }
+  await enter(ctx, page, statusFilter);
 }
 
 async function listAllPosts(page) {
@@ -131,4 +143,4 @@ async function registerHandlers(bot) {
   });
 }
 
-module.exports = { enter, registerHandlers };
+module.exports = { enter, handleText, registerHandlers };

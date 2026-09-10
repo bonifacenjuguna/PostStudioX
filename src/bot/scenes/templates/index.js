@@ -1,7 +1,7 @@
 const { Markup } = require('telegraf');
 const savedItems = require('../../../db/models/savedItems');
-const { paginationRow, PAGE_SIZE, offsetFor } = require('../../components/pagination');
-const { subScreenReplyKeyboard, flowReplyKeyboard } = require('../../components/navRow');
+const { paginationRow, PAGE_SIZE, offsetFor, parseJumpTarget } = require('../../components/pagination');
+const { subScreenReplyKeyboard, quickNavRow, withEmergencyStop } = require('../../components/navRow');
 
 async function enter(ctx, page = 0) {
   ctx.session = { scene: 'templates', page };
@@ -15,10 +15,21 @@ async function enter(ctx, page = 0) {
 
   const rows = templates.map((t) => [Markup.button.callback(`📄 ${t.name || '(unnamed)'}`, `tpl:view:${t.id}`)]);
   rows.push(...paginationRow(page, total, 'tpl'));
-  rows.push([Markup.button.callback('🏠 Home', 'nav:home')]);
+  rows.push(...quickNavRow('templates'));
 
   await ctx.reply(`🗂 Templates (${total})`, subScreenReplyKeyboard());
-  await ctx.reply('Pick a template:', Markup.inlineKeyboard(rows));
+  await ctx.reply('Pick a template:', Markup.inlineKeyboard(withEmergencyStop(rows)));
+}
+
+async function handleText(ctx) {
+  if (ctx.session.step !== 'awaiting_page_jump' || ctx.session.jumpPrefix !== 'tpl') return;
+  const total = await savedItems.countByKind('template');
+  const { ok, page, totalPages } = parseJumpTarget(ctx.message.text, total);
+  if (!ok) {
+    await ctx.reply(`Enter a number between 1 and ${totalPages}.`);
+    return;
+  }
+  await enter(ctx, page);
 }
 
 async function registerHandlers(bot, scenes) {
@@ -42,25 +53,22 @@ async function registerHandlers(bot, scenes) {
     );
   });
 
-  // v1.1.0 FIX (#9): previously this re-asked media type and re-ran the
-  // whole compose wizard even though the template already has finished
-  // content - now it loads the draft and jumps straight to the preview /
-  // finish screen (same one New Post lands on), where channels get picked
-  // only if you choose to Send or Schedule.
   bot.action(/^tpl:use:(\d+)$/, async (ctx) => {
     const id = parseInt(ctx.match[1], 10);
     await ctx.answerCbQuery();
     const t = await savedItems.findById(id);
     if (!t) return ctx.reply('Template not found.');
+    const { flowReplyKeyboard } = require('../../components/navRow');
+    const createPost = require('../create-post');
     ctx.session = {
       scene: 'create-post',
       draft: {
         channelIds: [], mediaType: t.media_type, mediaItems: t.media_items || [],
-        caption: t.caption || '', entities: t.entities || [], buttons: t.buttons || [], options: t.options || {},
+        caption: t.caption || '', entities: t.entities || [], buttons: t.buttons || [],
+        options: t.options || {}, templateName: null,
       },
     };
-    await ctx.reply('Using template — here\'s the preview:', flowReplyKeyboard());
-    const createPost = require('../create-post');
+    await ctx.reply('Using template — reviewing before you send.', flowReplyKeyboard());
     await createPost.goToPreview(ctx);
   });
 
@@ -79,4 +87,4 @@ async function registerHandlers(bot, scenes) {
   });
 }
 
-module.exports = { enter, registerHandlers };
+module.exports = { enter, handleText, registerHandlers };

@@ -12,14 +12,7 @@ function registerSceneRouter(bot, scenes) {
     const scene = scenes[toCamel(ctx.session.scene)];
     if (scene?.handleText) {
       await scene.handleText(ctx);
-      return;
     }
-    // v1.1.0 FIX: previously this silently swallowed the message with no
-    // fallback whenever the active scene had no handleText (e.g. Scheduled,
-    // History, Templates) - the update just vanished, no reply, no error.
-    // Falling through to next() lets later handlers (pagination "jump to
-    // page", etc.) still get a chance instead of text going nowhere.
-    return next();
   });
 
   bot.on(['photo', 'video', 'document'], async (ctx, next) => {
