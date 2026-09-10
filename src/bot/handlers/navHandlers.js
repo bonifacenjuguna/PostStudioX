@@ -1,5 +1,7 @@
 const { homeReplyKeyboard } = require('../components/navRow');
 const { clearSession } = require('../middleware/session');
+const emergencyStop = require('../../services/emergencyStop');
+const navStack = require('../navStack');
 
 async function goHome(ctx, { edit = false } = {}) {
   await clearSession(ctx);
@@ -15,11 +17,31 @@ async function goHome(ctx, { edit = false } = {}) {
   }
 }
 
-async function registerNavHandlers(bot) {
+function registerNavHandlers(bot, scenes) {
   bot.action('nav:home', async (ctx) => {
     await ctx.answerCbQuery();
     await goHome(ctx, { edit: true });
     await ctx.reply('Use the buttons below to navigate.', homeReplyKeyboard());
+  });
+
+  // Pops the shared cross-screen nav stack and asks whichever scene owns
+  // the previous frame to re-render it. Falls back to Home only when the
+  // stack is empty (you're already at the top of wherever you were) or the
+  // scene doesn't support it - never a dead tap.
+  bot.action('nav:back', async (ctx) => {
+    await ctx.answerCbQuery();
+    const frame = navStack.pop(ctx);
+    if (!frame) {
+      await goHome(ctx, { edit: true });
+      await ctx.reply('Use the buttons below to navigate.', homeReplyKeyboard());
+      return;
+    }
+    const scene = scenes[frame.scene];
+    if (!scene?.renderFromNavFrame) {
+      await goHome(ctx, { edit: true });
+      return;
+    }
+    await scene.renderFromNavFrame(ctx, frame);
   });
 
   bot.action('nav:cancel', async (ctx) => {
@@ -35,11 +57,37 @@ async function registerNavHandlers(bot) {
     await ctx.answerCbQuery();
   });
 
-  // v1.1.0 enhancement: "note" buttons on posts (see buttonBuilder.js) -
-  // tapping shows the note text as a popup instead of opening a link.
-  bot.action(/^note:(.+)$/, async (ctx) => {
-    await ctx.answerCbQuery(ctx.match[1], { show_alert: true });
+  // Lets any screen jump sideways to another section (quickNavRow) without
+  // backing out to Home first. This is the same entry logic mainMenu.js
+  // uses for the reply-keyboard buttons, just reachable from anywhere.
+  bot.action(/^nav:goto:(.+)$/, async (ctx) => {
+    const key = ctx.match[1];
+    const scene = scenes[key];
+    await ctx.answerCbQuery();
+    if (!scene?.enter) {
+      await ctx.reply("That section isn't available right now.");
+      return;
+    }
+    ctx.session = { scene: sceneKeyToName(key) };
+    await scene.enter(ctx);
   });
+
+  bot.action('nav:emergency_stop', async (ctx) => {
+    await ctx.answerCbQuery('Stopping everything...');
+    await emergencyStop.activate();
+    await clearSession(ctx);
+    await ctx.reply(
+      '🛑 Emergency Stop activated.\n\nAll scheduled posts, auto-deletes, and auto-reposts are paused.\nResume from ⚙️ Settings → 🛡 Watchdog when ready.',
+      homeReplyKeyboard()
+    );
+  });
+}
+
+// scenes object keys are camelCase ("createPost"); ctx.session.scene is
+// kebab-case for multi-word scenes ("create-post") to match sceneRouter's
+// toCamel() convention. This is the inverse mapping, used only here.
+function sceneKeyToName(key) {
+  return key.replace(/[A-Z]/g, (l) => `-${l.toLowerCase()}`);
 }
 
 module.exports = { registerNavHandlers, goHome };

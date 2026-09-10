@@ -1,8 +1,8 @@
 const { Markup } = require('telegraf');
 const savedItems = require('../../../db/models/savedItems');
 const { cancelScheduledPost } = require('../../../queue/queues');
-const { paginationRow, PAGE_SIZE, offsetFor } = require('../../components/pagination');
-const { subScreenReplyKeyboard, backHomeRow } = require('../../components/navRow');
+const { paginationRow, PAGE_SIZE, offsetFor, parseJumpTarget } = require('../../components/pagination');
+const { subScreenReplyKeyboard, quickNavRow, withEmergencyStop } = require('../../components/navRow');
 
 async function enter(ctx, page = 0) {
   ctx.session = { scene: 'scheduled', page };
@@ -23,16 +23,22 @@ async function enter(ctx, page = 0) {
     ),
   ]);
   rows.push(...paginationRow(page, total, 'sch'));
-  rows.push([Markup.button.callback('🏠 Home', 'nav:home')]);
-  await ctx.reply('Pending posts:', Markup.inlineKeyboard(rows));
+  rows.push(...quickNavRow('scheduled'));
+  await ctx.reply('Pending posts:', Markup.inlineKeyboard(withEmergencyStop(rows)));
+}
+
+async function handleText(ctx) {
+  if (ctx.session.step !== 'awaiting_page_jump' || ctx.session.jumpPrefix !== 'sch') return;
+  const total = await savedItems.countByKind('post', 'scheduled');
+  const { ok, page, totalPages } = parseJumpTarget(ctx.message.text, total);
+  if (!ok) {
+    await ctx.reply(`Enter a number between 1 and ${totalPages}.`);
+    return;
+  }
+  await enter(ctx, page);
 }
 
 async function registerHandlers(bot) {
-  bot.action('sch:list', async (ctx) => {
-    await ctx.answerCbQuery();
-    await enter(ctx, ctx.session.page || 0);
-  });
-
   bot.action(/^sch:page:(\d+)$/, async (ctx) => {
     await ctx.answerCbQuery();
     await enter(ctx, parseInt(ctx.match[1], 10));
@@ -50,19 +56,18 @@ async function registerHandlers(bot) {
     await ctx.reply(
       `🕐 Sends in ${hrs}h ${mins}m\n${item.caption?.slice(0, 200) || '(media post)'}\nChannels: ${item.channel_ids.join(', ')}`,
       Markup.inlineKeyboard([
-        [Markup.button.callback('✏️ Edit Time', `ep:reschedule:${id}`)],
+        [Markup.button.callback('✏️ Edit', `ep:reschedule:${id}`)],
         [Markup.button.callback('✏️ Edit Content', `sch:editcontent:${id}`)],
         [Markup.button.callback('🕐 Cancel Schedule', `sch:cancel:${id}`)],
-        backHomeRow('sch:list'),
+        [Markup.button.callback('🏠 Home', 'nav:home')],
       ])
     );
   });
 
   bot.action(/^sch:editcontent:(\d+)$/, async (ctx) => {
     await ctx.answerCbQuery();
-    const id = parseInt(ctx.match[1], 10);
     const { openEditMenu } = require('../edit-post');
-    await openEditMenu(ctx, id, { returnTo: `sch:view:${id}` });
+    await openEditMenu(ctx, parseInt(ctx.match[1], 10));
   });
 
   bot.action(/^sch:cancel:(\d+)$/, async (ctx) => {
@@ -70,7 +75,7 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     await ctx.reply('Cancel this scheduled post? It moves back to Draft (not deleted).', Markup.inlineKeyboard([
       [Markup.button.callback('✅ Yes, cancel it', `sch:cancelconfirm:${id}`)],
-      backHomeRow(`sch:view:${id}`),
+      [Markup.button.callback('❌ Nevermind', 'nav:cancel')],
     ]));
   });
 
@@ -83,4 +88,4 @@ async function registerHandlers(bot) {
   });
 }
 
-module.exports = { enter, registerHandlers };
+module.exports = { enter, handleText, registerHandlers };

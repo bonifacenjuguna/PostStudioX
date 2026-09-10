@@ -2,8 +2,8 @@ const { Markup } = require('telegraf');
 const savedItems = require('../../../db/models/savedItems');
 const statsModel = require('../../../db/models/stats');
 const db = require('../../../db/pool');
-const { paginationRow, PAGE_SIZE, offsetFor } = require('../../components/pagination');
-const { subScreenReplyKeyboard, backHomeRow } = require('../../components/navRow');
+const { paginationRow, PAGE_SIZE, offsetFor, parseJumpTarget } = require('../../components/pagination');
+const { subScreenReplyKeyboard, quickNavRow, withEmergencyStop } = require('../../components/navRow');
 
 async function enter(ctx, page = 0, statusFilter = null) {
   ctx.session = { scene: 'history', page, statusFilter };
@@ -31,8 +31,20 @@ async function enter(ctx, page = 0, statusFilter = null) {
     Markup.button.callback('🗑 Trashed', 'hist:filter:trashed'),
     Markup.button.callback('🔄 All', 'hist:filter:all'),
   ]);
-  rows.push([Markup.button.callback('🏠 Home', 'nav:home')]);
-  await ctx.reply('Posts:', Markup.inlineKeyboard(rows));
+  rows.push(...quickNavRow('history'));
+  await ctx.reply('Posts:', Markup.inlineKeyboard(withEmergencyStop(rows)));
+}
+
+async function handleText(ctx) {
+  if (ctx.session.step !== 'awaiting_page_jump' || ctx.session.jumpPrefix !== 'hist') return;
+  const statusFilter = ctx.session.statusFilter;
+  const total = statusFilter ? await savedItems.countByKind('post', statusFilter) : await countAllPosts();
+  const { ok, page, totalPages } = parseJumpTarget(ctx.message.text, total);
+  if (!ok) {
+    await ctx.reply(`Enter a number between 1 and ${totalPages}.`);
+    return;
+  }
+  await enter(ctx, page, statusFilter);
 }
 
 async function listAllPosts(page) {
@@ -53,11 +65,6 @@ function statusIcon(status) {
 }
 
 async function registerHandlers(bot) {
-  bot.action('hist:list', async (ctx) => {
-    await ctx.answerCbQuery();
-    await enter(ctx, ctx.session.page || 0, ctx.session.statusFilter || null);
-  });
-
   bot.action(/^hist:page:(\d+)$/, async (ctx) => {
     await ctx.answerCbQuery();
     await enter(ctx, parseInt(ctx.match[1], 10), ctx.session.statusFilter);
@@ -83,7 +90,7 @@ async function registerHandlers(bot) {
       rows.push([Markup.button.callback('📊 Stats', `hist:stats:${id}`)]);
       rows.push([Markup.button.callback('💾 Save to Folder', `hist:savefolder:${id}`)]);
     }
-    rows.push(backHomeRow('hist:list'));
+    rows.push([Markup.button.callback('🏠 Home', 'nav:home')]);
 
     await ctx.reply(
       `${statusIcon(item.status)} ${item.caption || '(media post)'}\n\nStatus: ${item.status} · v${item.version}\nChannels: ${item.channel_ids.join(', ')}`,
@@ -93,21 +100,20 @@ async function registerHandlers(bot) {
 
   bot.action(/^ep:open:(\d+)$/, async (ctx) => {
     await ctx.answerCbQuery();
-    const id = parseInt(ctx.match[1], 10);
     const { openEditMenu } = require('../edit-post');
-    await openEditMenu(ctx, id, { returnTo: `hist:view:${id}` });
+    await openEditMenu(ctx, parseInt(ctx.match[1], 10));
   });
 
   bot.action(/^hist:stats:(\d+)$/, async (ctx) => {
     const id = parseInt(ctx.match[1], 10);
     await ctx.answerCbQuery();
     const rows = await statsModel.forSavedItem(id);
-    if (rows.length === 0) return ctx.reply('No stats tracked for this post yet.', Markup.inlineKeyboard([backHomeRow(`hist:view:${id}`)]));
+    if (rows.length === 0) return ctx.reply('No stats tracked for this post yet.');
     const lines = rows.map((r) => {
       const reactions = Object.entries(r.reactions || {}).map(([emoji, count]) => `${emoji} ${count}`).join(' ');
       return `${r.chat_id}: 👁 ${r.views} views ${reactions ? '· ' + reactions : ''}`;
     });
-    await ctx.reply(`📊 Stats\n\n${lines.join('\n')}`, Markup.inlineKeyboard([backHomeRow(`hist:view:${id}`)]));
+    await ctx.reply(`📊 Stats\n\n${lines.join('\n')}`);
   });
 
   bot.action(/^hist:savefolder:(\d+)$/, async (ctx) => {
@@ -115,9 +121,8 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     const folders = require('../../../db/models/folders');
     const list = await folders.list();
-    if (list.length === 0) return ctx.reply('No folders yet — create one from 📁 My Folders first.', Markup.inlineKeyboard([backHomeRow(`hist:view:${id}`)]));
+    if (list.length === 0) return ctx.reply('No folders yet — create one from 📁 My Folders first.');
     const rows = list.map((f) => [Markup.button.callback(`📂 ${f.name}`, `hist:addtofolder:${f.id}:${id}`)]);
-    rows.push(backHomeRow(`hist:view:${id}`));
     await ctx.reply('Save to which folder?', Markup.inlineKeyboard(rows));
   });
 
@@ -138,4 +143,4 @@ async function registerHandlers(bot) {
   });
 }
 
-module.exports = { enter, registerHandlers };
+module.exports = { enter, handleText, registerHandlers };

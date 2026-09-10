@@ -12,9 +12,10 @@ const { resetCommand, registerResetHandlers, registerFactoryResetTextHandler } =
 const { registerNavHandlers } = require('./handlers/navHandlers');
 const { registerWatchdogAlertHandlers } = require('./handlers/watchdogAlertHandlers');
 const { registerReactionHandlers } = require('./handlers/reactionHandlers');
+const { registerChannelPostHandlers } = require('./handlers/channelPostHandlers');
 const { registerMainMenu } = require('./handlers/mainMenu');
 const { registerSceneRouter } = require('./sceneRouter');
-const { registerPaginationJump } = require('./components/pagination');
+const { registerJumpHandler } = require('./components/pagination');
 
 const channels = require('./scenes/channels');
 const createPost = require('./scenes/create-post');
@@ -37,24 +38,6 @@ function buildBot() {
   bot.command('status', statusCommand);
   bot.command('reset', resetCommand); // hidden - not registered with setMyCommands
 
-  registerHelpHandlers(bot);
-  registerStatusHandlers(bot);
-  registerResetHandlers(bot);
-  registerFactoryResetTextHandler(bot);
-  registerNavHandlers(bot);
-  registerWatchdogAlertHandlers(bot);
-  registerReactionHandlers(bot);
-
-  // v1.1.0 (#6): "🔢 Jump to page" on Templates/History/Scheduled was
-  // rendered but had no handler anywhere - wired up here, registered before
-  // the scene router so a pending jump always takes priority over whatever
-  // scene happens to be active.
-  registerPaginationJump(bot, {
-    tpl: (ctx, page) => templates.enter(ctx, page),
-    sch: (ctx, page) => scheduled.enter(ctx, page),
-    hist: (ctx, page) => history.enter(ctx, page, ctx.session.statusFilter || null),
-  });
-
   const scenes = {
     channels,
     createPost,
@@ -65,6 +48,28 @@ function buildBot() {
     history,
     settings,
   };
+
+  registerHelpHandlers(bot);
+  registerStatusHandlers(bot);
+  registerResetHandlers(bot);
+  registerFactoryResetTextHandler(bot);
+  registerNavHandlers(bot, scenes);
+  registerWatchdogAlertHandlers(bot);
+  registerReactionHandlers(bot);
+  registerChannelPostHandlers(bot);
+  registerJumpHandler(bot);
+
+  // The native "choose a channel" picker (channels:add) replies via a
+  // chat_shared field on an otherwise-plain message, not its own update
+  // type - has to be checked generically before the text/media routers,
+  // and must fall through untouched for every other message.
+  bot.on('message', async (ctx, next) => {
+    if (ctx.message.chat_shared && channels.handleChatShared) {
+      const handled = await channels.handleChatShared(ctx);
+      if (handled) return;
+    }
+    return next();
+  });
 
   registerMainMenu(bot, scenes);
   registerSceneRouter(bot, scenes);
@@ -84,7 +89,7 @@ function buildBot() {
     watchdogLog
       .record({ level: 'warning', category: 'bot', message: `Unhandled error: ${err.message}` })
       .catch(() => {});
-    ctx.reply(`🔴 Something went wrong: ${err.message}\n\n(Logged to watchdog events - Settings → Watchdog → Recent Events.)`).catch(() => {});
+    ctx.reply('🔴 Something went wrong handling that. The error has been logged.').catch(() => {});
   });
 
   return bot;
