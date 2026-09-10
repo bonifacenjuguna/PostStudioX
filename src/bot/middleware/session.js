@@ -18,17 +18,6 @@ const SESSION_TTL_SECONDS = 60 * 60 * 24 * 3; // 3 days - stale drafts expire, n
 
 function sessionMiddleware() {
   return async (ctx, next) => {
-    // channel_post / edited_channel_post / message_reaction_count updates
-    // (see ownerOnly.js - these now reach this middleware instead of being
-    // dropped) describe channel activity, not a wizard flow the owner is
-    // driving. ctx.chat for these is the CHANNEL, not the owner's private
-    // chat, so giving them a session would create junk rows in the sessions
-    // table keyed on channel chat IDs and could stomp on nothing useful.
-    // Only the owner's private chat with the bot carries real scene state.
-    if (ctx.chat && ctx.chat.type !== 'private') {
-      return next();
-    }
-
     const chatId = ctx.chat?.id || ctx.from?.id;
     if (!chatId) return next();
 
@@ -60,42 +49,18 @@ function sessionMiddleware() {
 
     await next();
 
-    // Persist whatever the handler left in ctx.session. Both stores are
-    // AWAITED (not fire-and-forget) before the webhook response completes.
-    // Previously the Postgres backup was fire-and-forget: if the Redis
-    // write above also failed (or the process restarted a beat later), a
-    // step transition set by a handler - e.g. "awaiting_folder_name" right
-    // after tapping "+ New Folder" - could vanish without landing in either
-    // store. The next message then reads back a session with no step, the
-    // scene's handleText matches nothing, and the owner sees total silence
-    // with no idea why. One retry on Redis + always awaiting Postgres closes
-    // that gap; if BOTH still fail, we say so instead of pretending it worked.
-    let redisOk = false;
-    for (let attempt = 0; attempt < 2 && !redisOk; attempt += 1) {
-      try {
-        await safeRedis.set(key, JSON.stringify(ctx.session || {}), 'EX', SESSION_TTL_SECONDS);
-        redisOk = true;
-      } catch (err) {
-        console.error(`[session] Redis write failed (attempt ${attempt + 1}):`, err.message);
-      }
-    }
-
-    let pgOk = false;
+    // Persist whatever the handler left in ctx.session.
     try {
-      await sessionsModel.save(chatId, ctx.session?.scene || null, ctx.session || {});
-      pgOk = true;
+      await safeRedis.set(key, JSON.stringify(ctx.session || {}), 'EX', SESSION_TTL_SECONDS);
     } catch (err) {
+      console.error('[session] Redis write failed:', err.message);
+    }
+    // Fire-and-forget the durability mirror; don't block the response on it.
+    // Outside the try/catch above on purpose - a Redis failure must never
+    // stop the Postgres backup from being attempted.
+    sessionsModel.save(chatId, ctx.session?.scene || null, ctx.session || {}).catch((err) => {
       console.error('[session] Postgres session backup write failed:', err.message);
-    }
-
-    if (!redisOk && !pgOk) {
-      // Neither store took the write. Whatever step/flag the handler just
-      // set is about to be lost. Tell the owner now, while there's still a
-      // message to attach it to, rather than leaving a silent dead end.
-      try {
-        await ctx.reply("⚠️ Couldn't save state just now (storage hiccup) - if your next message seems ignored, that's why. Please try again.");
-      } catch (_) { /* best effort */ }
-    }
+    });
   };
 }
 

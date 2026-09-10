@@ -1,29 +1,38 @@
 const { Markup } = require('telegraf');
 const folders = require('../../../db/models/folders');
-const savedItems = require('../../../db/models/savedItems');
-const { subScreenReplyKeyboard, quickNavRow, withEmergencyStop } = require('../../components/navRow');
+const { subScreenReplyKeyboard, backHomeRow } = require('../../components/navRow');
 
 async function enter(ctx) {
   ctx.session = { scene: 'folders' };
   const list = await folders.list();
   const rows = list.map((f) => [Markup.button.callback(`📂 ${f.name} (${f.item_count})`, `fld:view:${f.id}`)]);
   rows.push([Markup.button.callback('➕ New Folder', 'fld:new')]);
-  rows.push(...quickNavRow('folders'));
+  rows.push([Markup.button.callback('🏠 Home', 'nav:home')]);
   await ctx.reply('📁 My Folders', subScreenReplyKeyboard());
-  await ctx.reply(list.length ? 'Pick a folder:' : 'No folders yet.', Markup.inlineKeyboard(withEmergencyStop(rows)));
+  await ctx.reply(list.length ? 'Pick a folder:' : 'No folders yet.', Markup.inlineKeyboard(rows));
 }
 
 async function handleText(ctx) {
   if (ctx.session.step === 'awaiting_folder_name') {
-    await folders.create(ctx.message.text.trim());
-    ctx.session.step = null;
-    await ctx.reply('📂 Folder created.');
+    const name = ctx.message.text.trim();
+    if (!name) {
+      await ctx.reply('Folder name can\'t be empty — send a name:');
+      return;
+    }
+    await folders.create(name);
+    ctx.session = { scene: 'folders' };
+    await ctx.reply(`📂 Folder "${name}" created.`);
     await enter(ctx);
     return;
   }
   if (ctx.session.step === 'awaiting_rename') {
-    await folders.rename(ctx.session.renamingFolderId, ctx.message.text.trim());
-    ctx.session.step = null;
+    const name = ctx.message.text.trim();
+    if (!name) {
+      await ctx.reply('Folder name can\'t be empty — send a name:');
+      return;
+    }
+    await folders.rename(ctx.session.renamingFolderId, name);
+    ctx.session = { scene: 'folders' };
     await ctx.reply('✏️ Folder renamed.');
     await enter(ctx);
   }
@@ -32,7 +41,11 @@ async function handleText(ctx) {
 async function registerHandlers(bot) {
   bot.action('fld:new', async (ctx) => {
     await ctx.answerCbQuery();
-    ctx.session.step = 'awaiting_folder_name';
+    // v1.1.0 FIX (#10): a full reset (rather than mutating ctx.session.step
+    // in place) guarantees `scene` is definitely 'folders' when the text
+    // handler in sceneRouter looks it up next, no matter what state the
+    // session happened to be in beforehand.
+    ctx.session = { scene: 'folders', step: 'awaiting_folder_name' };
     await ctx.reply('Name the new folder:');
   });
 
@@ -40,14 +53,15 @@ async function registerHandlers(bot) {
     const id = parseInt(ctx.match[1], 10);
     await ctx.answerCbQuery();
     const folder = await folders.findById(id);
-    if (!folder) return ctx.reply('Folder not found.');
+    if (!folder) return ctx.reply('That folder no longer exists.');
     const items = await folders.itemsIn(id);
     const rows = items.map((i) => [
       Markup.button.callback(`${i.kind === 'template' ? '🗂' : '📝'} ${i.name || i.caption?.slice(0, 30) || '(untitled)'}`, `fld:item:${id}:${i.id}`),
     ]);
     rows.push([Markup.button.callback('✏️ Rename', `fld:rename:${id}`), Markup.button.callback('🗑 Delete Folder', `fld:delete:${id}`)]);
     rows.push([Markup.button.callback('⬅️ Back to Folders', 'fld:list')]);
-    await ctx.reply(`📂 ${folder.name}`, Markup.inlineKeyboard(withEmergencyStop(rows)));
+    rows.push([Markup.button.callback('🏠 Home', 'nav:home')]);
+    await ctx.reply(`📂 ${folder.name}${items.length ? '' : '\n\n(empty)'}`, Markup.inlineKeyboard(rows));
   });
 
   bot.action('fld:list', async (ctx) => {
@@ -63,38 +77,35 @@ async function registerHandlers(bot) {
       [Markup.button.callback('📝 Use as New Post', `tpl:use:${itemId}`)],
       [Markup.button.callback('🔀 Move to another folder', `fld:move:${folderId}:${itemId}`)],
       [Markup.button.callback('➖ Remove from folder', `fld:removeitem:${folderId}:${itemId}`)],
-      [Markup.button.callback('🏠 Home', 'nav:home')],
+      backHomeRow(`fld:view:${folderId}`),
     ]));
   });
 
-  // Previously "🔀 Move to another folder" had no handler registered
-  // anywhere - a dead tap. This also fixes a second problem the old button
-  // had even in principle: it only carried the itemId, with no source
-  // folder to remove the item FROM, so a correct move wasn't even possible
-  // without this extra hop.
+  // v1.1.0 FIX: "🔀 Move to another folder" above had no handler at all in
+  // the original code - tapping it did nothing. Implemented for real here.
   bot.action(/^fld:move:(\d+):(\d+)$/, async (ctx) => {
-    const sourceFolderId = parseInt(ctx.match[1], 10);
+    const fromFolderId = parseInt(ctx.match[1], 10);
     const itemId = parseInt(ctx.match[2], 10);
     await ctx.answerCbQuery();
     const list = await folders.list();
-    const options = list.filter((f) => f.id !== sourceFolderId);
-    if (options.length === 0) {
-      await ctx.reply('No other folders to move it to — create one first from 📁 My Folders.');
+    const others = list.filter((f) => f.id !== fromFolderId);
+    if (others.length === 0) {
+      await ctx.reply('No other folders to move this to yet — create one first from 📁 My Folders.');
       return;
     }
-    const rows = options.map((f) => [Markup.button.callback(`📂 ${f.name}`, `fld:moveto:${sourceFolderId}:${f.id}:${itemId}`)]);
+    const rows = others.map((f) => [Markup.button.callback(`📂 ${f.name}`, `fld:moveto:${fromFolderId}:${itemId}:${f.id}`)]);
     rows.push([Markup.button.callback('❌ Cancel', 'nav:cancel')]);
     await ctx.reply('Move to which folder?', Markup.inlineKeyboard(rows));
   });
 
   bot.action(/^fld:moveto:(\d+):(\d+):(\d+)$/, async (ctx) => {
-    const sourceFolderId = parseInt(ctx.match[1], 10);
-    const targetFolderId = parseInt(ctx.match[2], 10);
-    const itemId = parseInt(ctx.match[3], 10);
+    const fromFolderId = parseInt(ctx.match[1], 10);
+    const itemId = parseInt(ctx.match[2], 10);
+    const toFolderId = parseInt(ctx.match[3], 10);
     await ctx.answerCbQuery('Moved');
-    await folders.addItem(targetFolderId, itemId);
-    await folders.removeItem(sourceFolderId, itemId);
-    try { await ctx.editMessageText('🔀 Moved to the new folder.'); } catch (_) {}
+    await folders.addItem(toFolderId, itemId);
+    await folders.removeItem(fromFolderId, itemId);
+    try { await ctx.editMessageText('🔀 Moved to the other folder.'); } catch (_) {}
   });
 
   bot.action(/^fld:removeitem:(\d+):(\d+)$/, async (ctx) => {
@@ -116,7 +127,7 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     await ctx.reply('Delete this folder? Items inside stay in History, just un-foldered.', Markup.inlineKeyboard([
       [Markup.button.callback('✅ Yes, delete', `fld:deleteconfirm:${id}`)],
-      [Markup.button.callback('❌ Cancel', 'nav:cancel')],
+      backHomeRow(`fld:view:${id}`),
     ]));
   });
 

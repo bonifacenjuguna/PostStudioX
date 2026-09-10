@@ -1,6 +1,19 @@
 const db = require('../pool');
 
 const JSONB_COLUMNS = new Set(['media_items', 'entities', 'buttons', 'options']);
+const ARRAY_COLUMNS = new Set(['channel_ids']);
+
+// v1.1.0 (#12): shared by create() and updateWithVersion() so every caller
+// gets the same serialization behavior instead of each caller having to
+// remember to JSON.stringify() JSONB fields itself before calling. Passing
+// an already-stringified value still works (idempotent) so this is a safe,
+// backwards-compatible change for any code that still does it manually.
+function serializeColumn(col, raw) {
+  if (JSONB_COLUMNS.has(col) && raw !== null && raw !== undefined && typeof raw !== 'string') {
+    return JSON.stringify(raw);
+  }
+  return raw;
+}
 
 async function create(fields) {
   const cols = ['kind', 'name', 'status', 'channel_ids', 'media_type', 'media_items',
@@ -11,10 +24,7 @@ async function create(fields) {
     // node-postgres serializes plain JS arrays as Postgres array literals
     // ({a,b,c}), not JSON - fine for the real text[] channel_ids column, but
     // wrong for JSONB columns, which need an explicit JSON string.
-    if (JSONB_COLUMNS.has(c) && raw !== null && typeof raw !== 'string') {
-      return JSON.stringify(raw);
-    }
-    return raw;
+    return serializeColumn(c, raw);
   });
   const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
   const res = await db.query(
@@ -88,7 +98,7 @@ async function updateWithVersion(id, patch) {
 
       const setCols = Object.keys(patch);
       const setClauses = setCols.map((c, i) => `${c} = $${i + 2}`).join(', ');
-      const values = setCols.map((c) => patch[c]);
+      const values = setCols.map((c) => serializeColumn(c, patch[c]));
 
       const updated = await client.query(
         `UPDATE saved_items SET ${setClauses}, version = version + 1, updated_at = now() WHERE id = $1 RETURNING *`,
@@ -112,6 +122,11 @@ async function listVersions(id) {
   return res.rows;
 }
 
+// v1.1.0 FIX (#11): rollback previously only restored caption/entities/
+// buttons/media_items/options - channel_ids and media_type were left as-is.
+// Rolling back after e.g. swapping a photo for a video, or changing which
+// channels a draft targets, silently left the mismatched channel_ids /
+// media_type in place, which could desync media_type from media_items.
 async function rollbackToVersion(id, versionId) {
   return db.withClient(async (client) => {
     await client.query('BEGIN');
@@ -128,9 +143,11 @@ async function rollbackToVersion(id, versionId) {
 
       const updated = await client.query(
         `UPDATE saved_items SET caption = $2, entities = $3, buttons = $4, media_items = $5, options = $6,
+         channel_ids = $7, media_type = $8,
          version = version + 1, updated_at = now() WHERE id = $1 RETURNING *`,
         [id, snapshot.caption, JSON.stringify(snapshot.entities), JSON.stringify(snapshot.buttons),
-          JSON.stringify(snapshot.media_items), JSON.stringify(snapshot.options)]
+          JSON.stringify(snapshot.media_items), JSON.stringify(snapshot.options),
+          snapshot.channel_ids, snapshot.media_type]
       );
 
       await client.query('COMMIT');
@@ -177,16 +194,8 @@ async function pruneOldVersions(keep = 10) {
   return res.rows.length;
 }
 
-async function findMostRecentSent(kind = 'post') {
-  const res = await db.query(
-    `SELECT * FROM saved_items WHERE kind = $1 AND status = 'sent' ORDER BY sent_at DESC LIMIT 1`,
-    [kind]
-  );
-  return res.rows[0] || null;
-}
-
 module.exports = {
-  create, findById, listByKind, countByKind, listScheduled, findMostRecentSent,
+  create, findById, listByKind, countByKind, listScheduled,
   updateWithVersion, listVersions, rollbackToVersion,
   trash, restoreFromTrash, purgeOldTrash, hardDelete, pruneOldVersions,
 };

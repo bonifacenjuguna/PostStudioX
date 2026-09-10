@@ -4,15 +4,30 @@
 // ours is Redis-backed with a Postgres durability mirror, so we drive
 // dispatch manually here instead.
 
+// Only these are real, globally-registered commands that should always
+// escape whatever flow you're in. Everything else starting with "/" -
+// including in-flow pseudo-commands like /skip - must still reach the
+// active scene, or it's silently swallowed (this was the /skip bug: it
+// was being treated as an unknown command and dropped before ever
+// reaching the scene that knows what to do with it).
+const GLOBAL_COMMANDS = /^\/(start|help|status)(\s|$)/i;
+
 function registerSceneRouter(bot, scenes) {
   bot.on('text', async (ctx, next) => {
     if (!ctx.session?.scene) return next();
-    if (ctx.message.text?.startsWith('/')) return next(); // let commands through
+    if (GLOBAL_COMMANDS.test(ctx.message.text || '')) return next();
 
     const scene = scenes[toCamel(ctx.session.scene)];
     if (scene?.handleText) {
       await scene.handleText(ctx);
+      return;
     }
+    // v1.1.0 FIX: previously this silently swallowed the message with no
+    // fallback whenever the active scene had no handleText (e.g. Scheduled,
+    // History, Templates) - the update just vanished, no reply, no error.
+    // Falling through to next() lets later handlers (pagination "jump to
+    // page", etc.) still get a chance instead of text going nowhere.
+    return next();
   });
 
   bot.on(['photo', 'video', 'document'], async (ctx, next) => {

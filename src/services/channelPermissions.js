@@ -1,124 +1,67 @@
-// Single source of truth for "can the bot actually post in this channel".
-//
-// Previously four different places each did their own check, and all four
-// only looked at member.status === 'administrator' / 'creator'. That's true
-// even when every individual permission (post/edit/delete/etc.) has been
-// stripped by another admin - Telegram happily keeps you listed as
-// "administrator" with zero rights. Result: the bot would confidently
-// report "🟢 Admin rights confirmed" right up until an actual send failed.
-//
-// This is the one place that does the real check. Everything else
-// (channels scene recheck, watchdog alert recheck, the watchdog's periodic
-// sweep, the worker's pre-send guard) should call this instead of
-// telegram.getChatMember() directly.
+// Centralizes "is this bot actually usable in this channel" logic so every
+// place that checks admin status (channels scene, watchdog, watchdog alert
+// handlers, the scheduled-post worker's pre-send check) agrees on the same
+// definition. Previously each of those four places did its own
+// `['administrator', 'creator'].includes(status)` check, which is true even
+// when every individual permission has been stripped - "admin OK" could be
+// shown while the bot literally cannot post. can_post_messages is the one
+// permission that actually matters for this bot to function.
 
-// [key on Telegram's ChatMemberAdministrator, label, is this the one that
-// actually matters for "can this bot post at all"]
-const PERMISSION_CHECKS = [
-  ['can_post_messages', '📮 Post messages', true],
-  ['can_edit_messages', '✏️ Edit messages', false],
-  ['can_delete_messages', '🗑 Delete messages', false],
-  ['can_invite_users', '🔗 Invite via link', false],
-  ['can_change_info', '⚙️ Change channel info', false],
-  ['can_manage_chat', '🛠 Manage channel', false],
-  ['can_manage_video_chats', '🎥 Manage video chats', false],
-  ['can_promote_members', '👑 Promote other admins', false],
+const RELEVANT_PERMISSIONS = [
+  { key: 'can_post_messages', label: '📝 Post messages', critical: true },
+  { key: 'can_edit_messages', label: '✏️ Edit messages' },
+  { key: 'can_delete_messages', label: '🗑 Delete messages' },
+  { key: 'can_pin_messages', label: '📌 Pin messages' },
+  { key: 'can_invite_users', label: '🔗 Invite users' },
+  { key: 'can_change_info', label: 'ℹ️ Change channel info' },
+  { key: 'can_manage_chat', label: '🛠 Manage chat' },
+  { key: 'can_promote_members', label: '⬆️ Add new admins' },
 ];
 
-let cachedBotId = null;
-
-async function getBotId(telegram) {
-  if (cachedBotId) return cachedBotId;
-  const me = await telegram.getMe();
-  cachedBotId = me.id;
-  return cachedBotId;
+// True only if the bot can actually publish - creator always can; an
+// administrator needs can_post_messages explicitly true (channels default
+// new admin rights to *off* for this, unlike groups).
+function isEffectivelyAdmin(member) {
+  if (!member) return false;
+  if (member.status === 'creator') return true;
+  if (member.status !== 'administrator') return false;
+  return member.can_post_messages === true;
 }
 
-/**
- * Returns:
- *  {
- *    ok: boolean,              // true only if bot can actually post
- *    status: string,           // raw Telegram member status
- *    isAdmin: boolean,         // status is administrator/creator
- *    permissions: {            // only populated when isAdmin
- *      can_post_messages: bool, ...
- *    },
- *    reason: string|null,      // human-readable summary of what's wrong
- *  }
- */
-async function checkChannelPermissions(telegram, chatId, botId = null) {
-  const resolvedBotId = botId || (await getBotId(telegram));
-
-  let member;
-  try {
-    member = await telegram.getChatMember(chatId, resolvedBotId);
-  } catch (err) {
-    return {
-      ok: false,
-      status: 'unknown',
-      isAdmin: false,
-      permissions: {},
-      reason: `Could not check (${err.message}) - the bot may have been removed from the channel entirely.`,
-    };
-  }
-
-  const isAdmin = member.status === 'administrator' || member.status === 'creator';
-  // The creator/owner of a channel implicitly has every right there is,
-  // even though Telegram doesn't echo individual can_* fields for them.
-  const isCreator = member.status === 'creator';
-
-  if (!isAdmin) {
-    return {
-      ok: false,
-      status: member.status,
-      isAdmin: false,
-      permissions: {},
-      reason: `Not an admin (current status: ${member.status}).`,
-    };
-  }
-
-  const permissions = {};
-  for (const [key] of PERMISSION_CHECKS) {
-    permissions[key] = isCreator ? true : !!member[key];
-  }
-
-  const canPost = permissions.can_post_messages;
-
-  return {
-    ok: canPost,
-    status: member.status,
-    isAdmin: true,
-    permissions,
-    reason: canPost
-      ? null
-      : 'Listed as admin, but the "Post messages" permission has been removed - the bot cannot actually send here.',
-  };
+function describeIssue(member) {
+  if (!member) return 'unknown';
+  if (member.status === 'creator') return null;
+  if (member.status !== 'administrator') return `not an admin (status: ${member.status})`;
+  if (member.can_post_messages !== true) return 'admin, but missing "Post Messages" permission';
+  return null;
 }
 
-/**
- * Renders the well-formatted breakdown the channel screen and recheck
- * actions show: overall status first, then every individual permission,
- * critical one first.
- */
-function formatPermissionReport(result) {
-  const lines = [];
+// Multi-line, human-readable permission breakdown for the "Re-check Rights"
+// screen - shows exactly which permissions are on/off instead of a single
+// pass/fail boolean.
+function formatPermissions(member) {
+  if (!member) return '🔴 Could not read permissions.';
 
-  if (!result.isAdmin) {
-    lines.push(`🔴 Not an admin (status: ${result.status})`);
-    lines.push('The bot needs to be re-added as admin with "Post Messages" enabled.');
-    return lines.join('\n');
+  if (member.status === 'creator') {
+    return "👑 You're the owner of this channel — full permissions, always able to post.";
   }
 
-  lines.push(result.ok ? '🟢 Can post — full admin check below:' : '🟡 Admin, but cannot post — see below:');
-  lines.push('');
-
-  const sorted = [...PERMISSION_CHECKS].sort((a, b) => (b[2] ? 1 : 0) - (a[2] ? 1 : 0));
-  for (const [key, label] of sorted) {
-    const granted = result.permissions[key];
-    lines.push(`${granted ? '✅' : '❌'} ${label}`);
+  if (member.status !== 'administrator') {
+    return `🔴 Not an admin here (status: ${member.status}).\n\nPromote the bot to admin with at least "Post Messages" rights, then re-check.`;
   }
 
-  return lines.join('\n');
+  const lines = RELEVANT_PERMISSIONS.map(({ key, label, critical }) => {
+    const has = member[key] === true;
+    const icon = has ? '✅' : critical ? '🔴' : '⚪️';
+    return `${icon} ${label}`;
+  });
+
+  const canPost = member.can_post_messages === true;
+  const header = canPost
+    ? '🟢 Admin — the bot CAN post here.'
+    : '🟡 Admin, but the bot CANNOT post here — "Post Messages" is off.';
+
+  return `${header}\n\n${lines.join('\n')}`;
 }
 
-module.exports = { checkChannelPermissions, formatPermissionReport, PERMISSION_CHECKS };
+module.exports = { isEffectivelyAdmin, describeIssue, formatPermissions, RELEVANT_PERMISSIONS };
