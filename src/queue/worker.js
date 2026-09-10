@@ -10,9 +10,9 @@ const config = require('../config/env');
 const savedItems = require('../db/models/savedItems');
 const channelsModel = require('../db/models/channels');
 const { publishSavedItem } = require('../services/publisher');
-const { checkChannelPermissions } = require('../services/channelPermissions');
 const { scheduleAutoDelete } = require('./queues');
 const watchdogLog = require('../db/models/watchdogLog');
+const { isEffectivelyAdmin, describeIssue } = require('../services/channelPermissions');
 
 // Visibility only - this process crashing and letting Railway restart it
 // is the intended recovery path (see file header comment), but a silent
@@ -46,19 +46,21 @@ const scheduledPostWorker = new Worker(
     }
 
     // Live permission re-check right before sending, not just relying on
-    // the periodic channel health poll. Uses the same shared check as the
-    // channel screen and watchdog, so "admin but can't actually post" is
-    // caught here too, not just a bare status check.
+    // the periodic channel health poll.
     for (const chatId of item.channel_ids) {
-      const result = await checkChannelPermissions(bot.telegram, chatId);
-      if (!result.ok) {
-        await channelsModel.setPermissions(chatId, result);
+      try {
+        const member = await bot.telegram.getChatMember(chatId, (await bot.telegram.getMe()).id);
+        if (!isEffectivelyAdmin(member)) {
+          throw new Error(describeIssue(member) || 'not an admin');
+        }
+      } catch (err) {
+        await channelsModel.setAdminStatus(chatId, false, err.message);
         await watchdogLog.record({
           level: 'warning',
           category: 'channel',
-          message: `Cannot post to ${chatId} - ${result.reason} Scheduled post ${savedItemId} could not be sent.`,
+          message: `Lost admin rights in ${chatId} - scheduled post ${savedItemId} could not be sent.`,
         });
-        throw new Error(result.reason || 'not able to post'); // let BullMQ retry/backoff handle it
+        throw err; // let BullMQ retry/backoff handle it
       }
     }
 

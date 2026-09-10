@@ -1,4 +1,5 @@
 const { Markup } = require('telegraf');
+const { DateTime } = require('luxon');
 const settingsModel = require('../../../db/models/settings');
 const savedItems = require('../../../db/models/savedItems');
 const watchdogLog = require('../../../db/models/watchdogLog');
@@ -6,11 +7,12 @@ const emergencyStop = require('../../../services/emergencyStop');
 const exportImport = require('../../../services/exportImport');
 const db = require('../../../db/pool');
 const { safeRedis } = require('../../../queue/redisClient');
-const { subScreenReplyKeyboard } = require('../../components/navRow');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+const { subScreenReplyKeyboard, backHomeRow } = require('../../components/navRow');
 
+// v1.2.0: Emergency Stop no longer gets its own row wrapped around every
+// menu (withEmergencyStop) - it lives in exactly one place, the Watchdog
+// panel below, per feedback that having it "everywhere" made it unclear
+// whether it was already on or off.
 function menuKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('🎛 Defaults', 'set:defaults')],
@@ -19,7 +21,7 @@ function menuKeyboard() {
     [Markup.button.callback('🎨 Button Style Defaults', 'set:buttonstyle')],
     [Markup.button.callback('🗑 Auto-delete Defaults', 'set:autodelete')],
     [Markup.button.callback('💽 Storage', 'set:storage')],
-    [Markup.button.callback('🛡 Watchdog', 'set:watchdog')],
+    [Markup.button.callback('🛡 Watchdog & Emergency Stop', 'set:watchdog')],
     [Markup.button.callback('💾 Backup/Export', 'set:backup')],
     [Markup.button.callback('ℹ️ About', 'set:about')],
     [Markup.button.callback('🏠 Home', 'nav:home')],
@@ -32,6 +34,62 @@ async function enter(ctx) {
   await ctx.reply('Pick a section:', menuKeyboard());
 }
 
+// --- Timezone picker ------------------------------------------------------
+
+const TIMEZONES = [
+  ['UTC', 'UTC'], ['New York', 'America/New_York'],
+  ['Chicago', 'America/Chicago'], ['Denver', 'America/Denver'],
+  ['Los Angeles', 'America/Los_Angeles'], ['São Paulo', 'America/Sao_Paulo'],
+  ['London', 'Europe/London'], ['Berlin', 'Europe/Berlin'],
+  ['Moscow', 'Europe/Moscow'], ['Lagos', 'Africa/Lagos'],
+  ['Nairobi', 'Africa/Nairobi'], ['Cairo', 'Africa/Cairo'],
+  ['Dubai', 'Asia/Dubai'], ['Mumbai/Delhi', 'Asia/Kolkata'],
+  ['Shanghai', 'Asia/Shanghai'], ['Tokyo', 'Asia/Tokyo'],
+];
+
+async function timezonePanelText() {
+  const tz = await settingsModel.get('timezone', 'UTC');
+  const clockFormat = await settingsModel.get('clock_format', '24');
+  const now = DateTime.now().setZone(tz);
+  const nowStr = now.toFormat(clockFormat === '12' ? 'd MMM yyyy, h:mm a' : 'd MMM yyyy, HH:mm');
+  return (
+    `🌍 Timezone\n\n` +
+    `Current: ${tz}\n` +
+    `Right now there: ${nowStr}\n` +
+    `Clock format: ${clockFormat === '12' ? '12-hour' : '24-hour'}\n\n` +
+    `Used by ⏰ Scheduled posts and 🗑 auto-delete timers to understand what you mean by a time — ` +
+    `pick a zone below, or send an IANA zone name as text (e.g. Asia/Kolkata) if yours isn't listed.`
+  );
+}
+
+async function timezoneKeyboard() {
+  const tz = await settingsModel.get('timezone', 'UTC');
+  const clockFormat = await settingsModel.get('clock_format', '24');
+  const rows = [];
+  for (let i = 0; i < TIMEZONES.length; i += 2) {
+    const row = TIMEZONES.slice(i, i + 2).map(([label, iana]) =>
+      Markup.button.callback(`${tz === iana ? '✅ ' : ''}${label}`, `set:tz:${iana}`)
+    );
+    rows.push(row);
+  }
+  rows.push([Markup.button.callback(`${tz === 'Australia/Sydney' ? '✅ ' : ''}Sydney`, 'set:tz:Australia/Sydney')]);
+  rows.push([Markup.button.callback('⌨️ Type a Zone Name', 'set:tz:custom')]);
+  rows.push([Markup.button.callback(clockFormat === '24' ? '🕐 Switch to 12-hour' : '🕐 Switch to 24-hour', 'set:tz:toggleformat')]);
+  rows.push(backHomeRow('set:list'));
+  return Markup.inlineKeyboard(rows);
+}
+
+async function showTimezonePanel(ctx, { edit = false } = {}) {
+  const text = await timezonePanelText();
+  const keyboard = await timezoneKeyboard();
+  if (edit) {
+    try { return await ctx.editMessageText(text, keyboard); } catch (_) { /* fall through */ }
+  }
+  return ctx.reply(text, keyboard);
+}
+
+// --- Handlers --------------------------------------------------------------
+
 async function handleText(ctx) {
   const step = ctx.session.step;
   if (step === 'awaiting_timezone') {
@@ -43,12 +101,16 @@ async function handleText(ctx) {
     }
     await settingsModel.set('timezone', tz);
     ctx.session.step = null;
-    await ctx.reply(`🕐 Timezone set to ${tz}.`);
-    await enter(ctx);
+    await showTimezonePanel(ctx);
   }
 }
 
 async function registerHandlers(bot) {
+  bot.action('set:list', async (ctx) => {
+    await ctx.answerCbQuery();
+    try { await ctx.editMessageText('⚙️ Settings & System Status', menuKeyboard()); } catch (_) { await enter(ctx); }
+  });
+
   bot.action('set:defaults', async (ctx) => {
     await ctx.answerCbQuery();
     const defaults = await settingsModel.get('defaults', {});
@@ -57,7 +119,7 @@ async function registerHandlers(bot) {
       Markup.inlineKeyboard([
         [Markup.button.callback(`Toggle Protect Content`, 'set:toggle:protect_content')],
         [Markup.button.callback(`Toggle Silent Send`, 'set:toggle:disable_notification')],
-        [Markup.button.callback('🏠 Home', 'nav:home')],
+        backHomeRow('set:list'),
       ])
     );
   });
@@ -73,9 +135,25 @@ async function registerHandlers(bot) {
 
   bot.action('set:timezone', async (ctx) => {
     await ctx.answerCbQuery();
-    const tz = await settingsModel.get('timezone', 'UTC');
-    ctx.session.step = 'awaiting_timezone';
-    await ctx.reply(`Current timezone: ${tz}\n\nSend a new IANA timezone name (e.g. Africa/Nairobi):`);
+    await showTimezonePanel(ctx);
+  });
+
+  bot.action(/^set:tz:(.+)$/, async (ctx) => {
+    const val = ctx.match[1];
+    await ctx.answerCbQuery();
+    if (val === 'custom') {
+      ctx.session.step = 'awaiting_timezone';
+      await ctx.reply('Send an IANA timezone name, e.g. Africa/Nairobi or Asia/Kolkata:');
+      return;
+    }
+    if (val === 'toggleformat') {
+      const current = await settingsModel.get('clock_format', '24');
+      await settingsModel.set('clock_format', current === '24' ? '12' : '24');
+      await showTimezonePanel(ctx, { edit: true });
+      return;
+    }
+    await settingsModel.set('timezone', val);
+    await showTimezonePanel(ctx, { edit: true });
   });
 
   bot.action('set:notifications', async (ctx) => {
@@ -87,7 +165,7 @@ async function registerHandlers(bot) {
         [Markup.button.callback('Toggle Silent-Log Muting', 'set:notiftoggle:watchdog_silent_logs')],
         [Markup.button.callback('Toggle Quiet Hours', 'set:notiftoggle:quiet_hours_enabled')],
         [Markup.button.callback('Toggle Clean Chat Mode', 'set:notiftoggle:clean_chat_mode')],
-        [Markup.button.callback('🏠 Home', 'nav:home')],
+        backHomeRow('set:list'),
       ])
     );
   });
@@ -106,6 +184,7 @@ async function registerHandlers(bot) {
     await ctx.reply('Pick the default color for new buttons:', Markup.inlineKeyboard([
       [Markup.button.callback('🔵 Primary', 'set:btnstyleset:bg_primary'), Markup.button.callback('🔴 Danger', 'set:btnstyleset:bg_danger')],
       [Markup.button.callback('🟢 Success', 'set:btnstyleset:bg_success'), Markup.button.callback('⚪ Default', 'set:btnstyleset:default')],
+      backHomeRow('set:list'),
     ]));
   });
 
@@ -123,6 +202,7 @@ async function registerHandlers(bot) {
     await ctx.reply('Default auto-delete TTL for new posts:', Markup.inlineKeyboard([
       [Markup.button.callback('Off', 'set:autodeleteset:0'), Markup.button.callback('10 min', 'set:autodeleteset:10')],
       [Markup.button.callback('1 hr', 'set:autodeleteset:60'), Markup.button.callback('24 hr', 'set:autodeleteset:1440')],
+      backHomeRow('set:list'),
     ]));
   });
 
@@ -139,8 +219,8 @@ async function registerHandlers(bot) {
     await ctx.reply(text, Markup.inlineKeyboard([
       [Markup.button.callback('🧹 Clean Old Versions', 'set:cleanversions')],
       [Markup.button.callback('🧹 Clean Old Watchdog Logs', 'set:cleanlogs')],
-      [Markup.button.callback('🧹 Clear Temp Files', 'set:cleantemp')],
-      [Markup.button.callback('🏠 Home', 'nav:home')],
+      [Markup.button.callback('🧹 Purge Old Trash Now', 'set:cleantrash')],
+      backHomeRow('set:list'),
     ]));
   });
 
@@ -158,55 +238,61 @@ async function registerHandlers(bot) {
     await ctx.reply(`🧹 Removed ${n} old watchdog log entries.`);
   });
 
-  bot.action('set:cleantemp', async (ctx) => {
+  bot.action('set:cleantrash', async (ctx) => {
     await ctx.answerCbQuery('Cleaning...');
-    const tmpDir = path.join(os.tmpdir(), 'bot-media-cache');
-    let count = 0;
-    if (fs.existsSync(tmpDir)) {
-      const files = fs.readdirSync(tmpDir);
-      for (const f of files) {
-        fs.unlinkSync(path.join(tmpDir, f));
-        count += 1;
-      }
-    }
-    await ctx.reply(`🧹 Cleared ${count} temp file(s).`);
+    const cleanup = await settingsModel.get('cleanup_rules', {});
+    const n = await savedItems.purgeOldTrash(cleanup.keep_trash_days || 30);
+    await ctx.reply(`🧹 Permanently removed ${n} old trashed post(s).`);
   });
 
+  // v1.2.0: Watchdog & Emergency Stop panel - two separate, clearly
+  // labeled concepts that used to be blurred together:
+  //   1. Watchdog monitoring (self-healing / alerting) - pause/resume
+  //   2. Emergency Stop (pauses the actual send/auto-delete/auto-repost
+  //      pipeline) - now lives ONLY here, always shows real current state
+  //      before offering an action, and requires a confirm tap to activate
+  //      since it affects everything scheduled.
   bot.action('set:watchdog', async (ctx) => {
     await ctx.answerCbQuery();
-    const paused = await settingsModel.get('watchdog_paused', false);
-    const stopActive = await emergencyStop.isActive();
-    await ctx.reply(
-      `🛡 Watchdog\n\nStatus: ${stopActive ? '🛑 Emergency Stop active' : paused ? '⏸ Paused' : '🟢 Active'}`,
-      Markup.inlineKeyboard([
-        stopActive
-          ? [Markup.button.callback('▶️ Resume Everything', 'set:resumestop')]
-          : [Markup.button.callback(paused ? '▶️ Resume Watchdog' : '⏸ Pause Watchdog', 'set:togglewatchdog')],
-        [Markup.button.callback('📜 Recent Events', 'set:watchdoglog')],
-        [Markup.button.callback('🏠 Home', 'nav:home')],
-      ])
-    );
-  });
-
-  bot.action('set:resumestop', async (ctx) => {
-    await ctx.answerCbQuery('Resumed');
-    await emergencyStop.deactivate();
-    try { await ctx.editMessageText('▶️ Emergency Stop lifted. Everything resumed.'); } catch (_) {}
+    await showWatchdogPanel(ctx);
   });
 
   bot.action('set:togglewatchdog', async (ctx) => {
     await ctx.answerCbQuery('Toggled');
     const paused = await settingsModel.get('watchdog_paused', false);
     await settingsModel.set('watchdog_paused', !paused);
-    try { await ctx.editMessageText(`🛡 Watchdog is now ${!paused ? 'paused' : 'active'}.`); } catch (_) {}
+    await showWatchdogPanel(ctx, { edit: true });
+  });
+
+  bot.action('set:stopactivate', async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.reply(
+      '🛑 Activate Emergency Stop?\n\nThis immediately pauses ALL scheduled posts, auto-deletes, and auto-reposts until you resume it.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('✅ Yes, stop everything', 'set:stopactivateconfirm')],
+        backHomeRow('set:watchdog'),
+      ])
+    );
+  });
+
+  bot.action('set:stopactivateconfirm', async (ctx) => {
+    await ctx.answerCbQuery('Stopping everything...');
+    await emergencyStop.activate();
+    await showWatchdogPanel(ctx, { edit: true });
+  });
+
+  bot.action('set:resumestop', async (ctx) => {
+    await ctx.answerCbQuery('Resumed');
+    await emergencyStop.deactivate();
+    await showWatchdogPanel(ctx, { edit: true });
   });
 
   bot.action('set:watchdoglog', async (ctx) => {
     await ctx.answerCbQuery();
     const logs = await watchdogLog.listRecent({ limit: 8 });
-    if (logs.length === 0) return ctx.reply('No watchdog events recorded yet.');
+    if (logs.length === 0) return ctx.reply('No watchdog events recorded yet.', Markup.inlineKeyboard([backHomeRow('set:watchdog')]));
     const lines = logs.map((l) => `${l.level === 'critical' ? '🔴' : l.level === 'warning' ? '🟡' : '⚪'} [${l.category}] ${l.message} (${new Date(l.created_at).toLocaleString()})`);
-    await ctx.reply(`📜 Recent Watchdog Events\n\n${lines.join('\n')}`);
+    await ctx.reply(`📜 Recent Watchdog Events\n\n${lines.join('\n')}`, Markup.inlineKeyboard([backHomeRow('set:watchdog')]));
   });
 
   bot.action('set:backup', async (ctx) => {
@@ -216,7 +302,7 @@ async function registerHandlers(bot) {
       [Markup.button.callback('📤 Export Templates Only', 'set:export:templates')],
       [Markup.button.callback('📤 Export Settings Only', 'set:export:settings')],
       [Markup.button.callback('📥 Import', 'set:import')],
-      [Markup.button.callback('🏠 Home', 'nav:home')],
+      backHomeRow('set:list'),
     ]));
   });
 
@@ -248,8 +334,33 @@ async function registerHandlers(bot) {
   bot.action('set:about', async (ctx) => {
     await ctx.answerCbQuery();
     const config = require('../../../config/env');
-    await ctx.reply(`ℹ️ About\n\nBot version: v${config.botVersion}\nEnvironment: ${config.nodeEnv}`);
+    await ctx.reply(`ℹ️ About\n\nBot version: v${config.botVersion}\nEnvironment: ${config.nodeEnv}`, Markup.inlineKeyboard([backHomeRow('set:list')]));
   });
+}
+
+async function showWatchdogPanel(ctx, { edit = false } = {}) {
+  const paused = await settingsModel.get('watchdog_paused', false);
+  const stopActive = await emergencyStop.isActive();
+
+  const text =
+    `🛡 Watchdog & Emergency Stop\n\n` +
+    `Watchdog monitoring: ${paused ? '⏸ Paused' : '🟢 Active'}\n` +
+    `Emergency Stop: ${stopActive ? '🛑 ACTIVE — sends/deletes/reposts are paused' : '🟢 Normal — nothing is paused'}`;
+
+  const rows = [
+    [Markup.button.callback(paused ? '▶️ Resume Watchdog Monitoring' : '⏸ Pause Watchdog Monitoring', 'set:togglewatchdog')],
+    stopActive
+      ? [Markup.button.callback('▶️ Resume Everything', 'set:resumestop')]
+      : [Markup.button.callback('🛑 Activate Emergency Stop', 'set:stopactivate')],
+    [Markup.button.callback('📜 Recent Events', 'set:watchdoglog')],
+    backHomeRow('set:list'),
+  ];
+
+  const keyboard = Markup.inlineKeyboard(rows);
+  if (edit) {
+    try { return await ctx.editMessageText(text, keyboard); } catch (_) { /* fall through */ }
+  }
+  return ctx.reply(text, keyboard);
 }
 
 async function buildStorageText() {

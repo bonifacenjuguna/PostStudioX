@@ -13,9 +13,8 @@ const channelsModel = require('../db/models/channels');
 const watchdogLog = require('../db/models/watchdogLog');
 const settingsModel = require('../db/models/settings');
 const emergencyStop = require('../services/emergencyStop');
-const { checkChannelPermissions } = require('../services/channelPermissions');
-const { ALLOWED_UPDATES } = require('../config/allowedUpdates');
 const { scheduledPostQueue, autoDeleteQueue } = require('../queue/queues');
+const { isEffectivelyAdmin, describeIssue } = require('../services/channelPermissions');
 
 const bot = new Telegraf(config.botToken());
 const OWNER_ID = config.ownerId();
@@ -102,18 +101,23 @@ async function checkChannels() {
   const me = await bot.telegram.getMe();
   for (const ch of channels) {
     try {
-      const result = await checkChannelPermissions(bot.telegram, ch.chat_id, me.id);
-      await channelsModel.setPermissions(ch.chat_id, result);
-      if (!result.ok && ch.is_admin) {
+      const member = await bot.telegram.getChatMember(ch.chat_id, me.id);
+      const isAdmin = isEffectivelyAdmin(member);
+      if (!isAdmin && ch.is_admin) {
         // Just transitioned to broken - pause its scheduled posts and alert.
-        await watchdogLog.record({ level: 'warning', category: 'channel', message: `${ch.title || ch.chat_id}: ${result.reason}`, selfHealed: true });
-        await alertOwner(
-          `📡 ${ch.title || ch.chat_id}: ${result.reason}`,
-          [
-            [Markup.button.callback('🔄 Retry Check', `wd:recheck:${ch.chat_id}`)],
-            [Markup.button.callback('🗑 Remove Channel', `wd:removechannel:${ch.chat_id}`)],
-          ]
-        );
+        await channelsModel.setAdminStatus(ch.chat_id, false, describeIssue(member));
+        await watchdogLog.record({ level: 'warning', category: 'channel', message: `Lost admin rights in ${ch.title || ch.chat_id}`, selfHealed: true });
+        if (!ch.muted) {
+          await alertOwner(
+            `📡 ${ch.title || ch.chat_id} lost admin rights.`,
+            [
+              [Markup.button.callback('🔄 Retry Check', `wd:recheck:${ch.chat_id}`)],
+              [Markup.button.callback('🗑 Remove Channel', `wd:removechannel:${ch.chat_id}`)],
+            ]
+          );
+        }
+      } else if (isAdmin && !ch.is_admin) {
+        await channelsModel.setAdminStatus(ch.chat_id, true, null);
       }
     } catch (err) {
       await channelsModel.setAdminStatus(ch.chat_id, false, err.message);
@@ -139,7 +143,10 @@ async function checkWebhookLiveness() {
       if (!info.url) {
         await bot.telegram.setWebhook(`${config.webhookUrl()}/webhook/${config.webhookSecretToken()}`, {
           secret_token: config.webhookSecretToken(),
-          allowed_updates: ALLOWED_UPDATES,
+          allowed_updates: [
+            'message', 'edited_message', 'callback_query', 'channel_post',
+            'edited_channel_post', 'message_reaction', 'message_reaction_count',
+          ],
         });
         await watchdogLog.record({ level: 'warning', category: 'webhook', message: 'Webhook was unregistered - re-registered automatically.', selfHealed: true });
       }

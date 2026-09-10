@@ -1,15 +1,14 @@
 const { Markup } = require('telegraf');
 const savedItems = require('../../../db/models/savedItems');
-const { parseShorthand, replaceLinkUrl, stripLinks } = require('../../../services/telegramFormatter');
+const { parseShorthand, stripLinks } = require('../../../services/telegramFormatter');
 const { publishSavedItem } = require('../../../services/publisher');
 const { schedulePost, cancelScheduledPost } = require('../../../queue/queues');
 const { buildInlineKeyboard } = require('../../../services/buttonBuilder');
-const { flowReplyKeyboard, homeReplyKeyboard } = require('../../components/navRow');
-const { checkChannelPermissions, formatPermissionReport } = require('../../../services/channelPermissions');
+const { flowReplyKeyboard, homeReplyKeyboard, backHomeRow } = require('../../components/navRow');
 const { DateTime } = require('luxon');
 const settingsModel = require('../../../db/models/settings');
 
-function editMenuKeyboard(item) {
+function editMenuKeyboard(item, returnTo) {
   const rows = [
     [Markup.button.callback('✏️ Edit Caption', `ep:caption:${item.id}`)],
     [Markup.button.callback('🔘 Edit Buttons', `ep:buttons:${item.id}`)],
@@ -25,17 +24,20 @@ function editMenuKeyboard(item) {
   rows.push([Markup.button.callback('🕓 Version History', `ep:versions:${item.id}`)]);
   rows.push([Markup.button.callback('📋 Clone to...', `ep:clone:${item.id}`)]);
   rows.push([Markup.button.callback('🗑 Delete', `ep:delete:${item.id}`)]);
-  rows.push([Markup.button.callback('🏠 Home', 'nav:home')]);
+  rows.push(returnTo ? backHomeRow(returnTo) : [Markup.button.callback('🏠 Home', 'nav:home')]);
   return Markup.inlineKeyboard(rows);
 }
 
-async function openEditMenu(ctx, itemId) {
+// v1.2.0: `returnTo` is a callback_data string pointing back to wherever
+// this edit menu was opened from (e.g. `hist:view:42`, `tpl:view:7`) so
+// the Back button is a real "previous screen," not another Home shortcut.
+async function openEditMenu(ctx, itemId, { returnTo } = {}) {
   const item = await savedItems.findById(itemId);
   if (!item) return ctx.reply('That post no longer exists.');
-  ctx.session = { scene: 'edit-post', editingId: itemId };
+  ctx.session = { scene: 'edit-post', editingId: itemId, editReturnTo: returnTo };
   await ctx.reply(
     `Editing: ${item.name || item.caption?.slice(0, 60) || '(untitled)'}\nStatus: ${item.status} · v${item.version}`,
-    editMenuKeyboard(item)
+    editMenuKeyboard(item, returnTo)
   );
 }
 
@@ -46,7 +48,7 @@ async function handleText(ctx) {
 
   if (step === 'awaiting_new_caption') {
     const { text, entities } = parseShorthand(ctx.message.text);
-    const item = await savedItems.updateWithVersion(id, { caption: text, entities: JSON.stringify(entities) });
+    const item = await savedItems.updateWithVersion(id, { caption: text, entities });
     if (item.status === 'sent') {
       await applyLiveEdit(ctx, item);
     }
@@ -58,6 +60,7 @@ async function handleText(ctx) {
     const tz = await settingsModel.get('timezone', 'UTC');
     const dt = DateTime.fromFormat(ctx.message.text.trim(), 'yyyy-MM-dd HH:mm', { zone: tz });
     if (!dt.isValid) return ctx.reply('Could not parse that. Use format: 2026-09-05 18:30');
+    if (dt.toUTC().toMillis() <= Date.now()) return ctx.reply('That time is in the past — send a future date/time.');
     await cancelScheduledPost(id);
     await savedItems.updateWithVersion(id, { scheduled_for: dt.toUTC().toISO() });
     await schedulePost(id, dt.toUTC().toISO());
@@ -66,29 +69,19 @@ async function handleText(ctx) {
   }
 
   if (step === 'awaiting_clone_target') {
-    const item = await savedItems.findById(id);
     const target = ctx.message.text.trim();
-    let chat;
+    const item = await savedItems.findById(id);
     try {
-      chat = await ctx.telegram.getChat(target);
-    } catch (err) {
-      await ctx.reply(`🔴 Couldn't find that chat: ${err.message}`);
-      return;
-    }
-    const permResult = await checkChannelPermissions(ctx.telegram, chat.id);
-    if (!permResult.ok) {
-      await ctx.reply(`⚠️ Can't post there yet:\n\n${formatPermissionReport(permResult)}`);
-      return;
-    }
-    const clone = await savedItems.create({
-      kind: 'post', status: 'draft', channelIds: [String(chat.id)], mediaType: item.media_type,
-      mediaItems: item.media_items, caption: item.caption, entities: item.entities, buttons: item.buttons, options: item.options,
-    });
-    try {
-      await publishSavedItem(ctx.telegram, { ...clone, channel_ids: [String(chat.id)] });
+      const me = await ctx.telegram.getMe();
+      await ctx.telegram.getChatMember(target, me.id); // throws if bot can't see/isn't in that chat
+      const clone = await savedItems.create({
+        kind: 'post', status: 'draft', channelIds: [target], mediaType: item.media_type,
+        mediaItems: item.media_items, caption: item.caption, entities: item.entities, buttons: item.buttons, options: item.options,
+      });
+      await publishSavedItem(ctx.telegram, { ...clone, channel_ids: [target] });
       await ctx.reply('📋 Cloned and posted.', homeReplyKeyboard());
     } catch (err) {
-      await ctx.reply(`🔴 Send failed: ${err.message}`);
+      await ctx.reply(`🔴 Couldn't clone to that channel: ${err.message}\n\nMake sure the bot is an admin there first (📡 Channels → ➕ Add Channel).`, homeReplyKeyboard());
     }
     ctx.session = {};
   }
@@ -119,7 +112,7 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     const item = await savedItems.findById(id);
     const stripped = stripLinks(item.caption, item.entities);
-    const updated = await savedItems.updateWithVersion(id, { caption: stripped.text, entities: JSON.stringify(stripped.entities) });
+    const updated = await savedItems.updateWithVersion(id, { caption: stripped.text, entities: stripped.entities });
     if (updated.status === 'sent') await applyLiveEdit(ctx, updated);
     await ctx.reply('🧹 Links stripped from this post.', homeReplyKeyboard());
   });
@@ -146,7 +139,7 @@ async function registerHandlers(bot) {
     const flat = (item.buttons || []).flat();
     flat.splice(idx, 1);
     const newButtons = flat.length ? [flat] : [];
-    const updated = await savedItems.updateWithVersion(id, { buttons: JSON.stringify(newButtons) });
+    const updated = await savedItems.updateWithVersion(id, { buttons: newButtons });
     if (updated.status === 'sent') {
       const refs = (updated.current_message_refs || []);
       for (const ref of refs) {
@@ -191,7 +184,7 @@ async function registerHandlers(bot) {
   bot.action(/^ep:clone:(\d+)$/, async (ctx) => {
     await ctx.answerCbQuery();
     ctx.session = { scene: 'edit-post', editingId: parseInt(ctx.match[1], 10), step: 'awaiting_clone_target' };
-    await ctx.reply('Send the @username or chat ID of the channel to clone this post to.');
+    await ctx.reply('Send the @username or chat ID of the channel to clone this post to (the bot must already be admin there).');
   });
 
   bot.action(/^ep:delete:(\d+)$/, async (ctx) => {
@@ -248,7 +241,7 @@ async function handleMedia(ctx) {
   else if (ctx.message.document) { fileId = ctx.message.document.file_id; type = 'document'; }
   else return;
 
-  const item = await savedItems.updateWithVersion(id, { media_items: JSON.stringify([{ file_id: fileId, type }]) });
+  const item = await savedItems.updateWithVersion(id, { media_items: [{ file_id: fileId, type }] });
   const refs = (item.current_message_refs || []);
   for (const ref of refs) {
     try {

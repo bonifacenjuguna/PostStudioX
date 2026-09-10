@@ -26,33 +26,31 @@ function offsetFor(page) {
   return page * PAGE_SIZE;
 }
 
-// Turns typed input into a validated 0-indexed page number, or a rejection
-// with the valid range so the caller can prompt again.
-function parseJumpTarget(text, totalItems) {
-  const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
-  const n = parseInt(String(text).trim(), 10);
-  if (!Number.isInteger(n) || n < 1 || n > totalPages) {
-    return { ok: false, totalPages };
-  }
-  return { ok: true, page: n - 1, totalPages };
-}
-
-// Single shared handler for the "🔢 Jump to page" button across every list
-// screen that uses paginationRow (templates/scheduled/history). Previously
-// this button had no handler registered anywhere at all - a pure dead tap.
-// Each scene still needs a tiny handleText that checks for
-// ctx.session.step === 'awaiting_page_jump' and calls parseJumpTarget with
-// its own total count - this just standardizes the prompt/step so it can't
-// drift between scenes.
-function registerJumpHandler(bot) {
-  bot.action(/^(\w+):jump$/, async (ctx) => {
+// v1.1.0 FIX (#6): "🔢 Jump to page" rendered by paginationRow() above had
+// no handler anywhere - tapping it did nothing. `handlers` maps a
+// callback-prefix ('tpl', 'hist', 'sch', ...) to an async (ctx, zeroBasedPage)
+// function that re-renders that scene's list at the requested page.
+function registerPaginationJump(bot, handlers) {
+  bot.action(/^([a-zA-Z]+):jump$/, async (ctx) => {
     const prefix = ctx.match[1];
-    if (!ctx.session?.scene) return; // stray tap from a stale keyboard, no scene to jump within
+    if (!handlers[prefix]) return ctx.answerCbQuery();
     await ctx.answerCbQuery();
-    ctx.session.step = 'awaiting_page_jump';
-    ctx.session.jumpPrefix = prefix;
-    await ctx.reply('Which page number? (see the current "x / y" indicator for the total)');
+    ctx.session = { ...(ctx.session || {}), awaitingPageJumpFor: prefix };
+    await ctx.reply('Send the page number to jump to (e.g. 3):');
+  });
+
+  bot.on('text', async (ctx, next) => {
+    const prefix = ctx.session?.awaitingPageJumpFor;
+    if (!prefix || !handlers[prefix] || ctx.message.text?.startsWith('/')) return next();
+
+    const n = parseInt(ctx.message.text.trim(), 10);
+    delete ctx.session.awaitingPageJumpFor;
+    if (!Number.isInteger(n) || n < 1) {
+      await ctx.reply('That\'s not a valid page number. Try again with just a number, e.g. 3.');
+      return;
+    }
+    await handlers[prefix](ctx, n - 1);
   });
 }
 
-module.exports = { PAGE_SIZE, paginationRow, offsetFor, parseJumpTarget, registerJumpHandler };
+module.exports = { PAGE_SIZE, paginationRow, offsetFor, registerPaginationJump };
