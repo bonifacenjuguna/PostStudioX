@@ -1,7 +1,7 @@
 const { subScreenReplyKeyboard } = require('../components/navRow');
 
 function registerMainMenu(bot, scenes) {
-  bot.hears('📝 New Post', async (ctx) => {
+  bot.hears('🎨 Compose', async (ctx) => {
     ctx.session = {};
     await scenes.createPost.enter(ctx);
   });
@@ -14,11 +14,6 @@ function registerMainMenu(bot, scenes) {
   bot.hears('🗂 Templates', async (ctx) => {
     ctx.session = { scene: 'templates' };
     await scenes.templates.enter(ctx);
-  });
-
-  bot.hears('📁 My Folders', async (ctx) => {
-    ctx.session = { scene: 'folders' };
-    await scenes.folders.enter(ctx);
   });
 
   bot.hears('⏰ Scheduled', async (ctx) => {

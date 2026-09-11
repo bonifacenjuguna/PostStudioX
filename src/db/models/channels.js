@@ -40,4 +40,40 @@ async function setMuted(chatId, muted) {
   return res.rows[0];
 }
 
-module.exports = { list, findByChatId, add, remove, setAdminStatus, setMuted };
+// Persists a permission snapshot (see channelPermissions.snapshotRights) so
+// Manage Channels can show granted-vs-missing without a live API call.
+async function setAdminRights(chatId, rightsSnapshot) {
+  const res = await db.query(
+    'UPDATE channels SET admin_rights = $2, rights_checked_at = now() WHERE chat_id = $1 RETURNING *',
+    [String(chatId), JSON.stringify(rightsSnapshot)]
+  );
+  return res.rows[0];
+}
+
+async function setPostSignature(chatId, signature) {
+  const res = await db.query(
+    'UPDATE channels SET post_signature = $2 WHERE chat_id = $1 RETURNING *',
+    [String(chatId), signature]
+  );
+  return res.rows[0];
+}
+
+async function setSignMessages(chatId, enabled) {
+  const res = await db.query(
+    'UPDATE channels SET sign_messages = $2 WHERE chat_id = $1 RETURNING *',
+    [String(chatId), enabled]
+  );
+  return res.rows[0];
+}
+
+module.exports = {
+  list,
+  findByChatId,
+  add,
+  remove,
+  setAdminStatus,
+  setMuted,
+  setAdminRights,
+  setPostSignature,
+  setSignMessages,
+};

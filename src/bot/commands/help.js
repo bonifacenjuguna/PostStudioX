@@ -5,14 +5,14 @@ const TOPICS = {
     title: '🧭 How this bot works',
     body:
       "This is PostStudioX (@PostStudioXBot) — it only responds to you. Almost everything is done through *buttons* — two kinds:\n\n" +
-      '• *Reply keyboard* (bottom bar, below where you type) — main navigation: New Post, Channels, Templates, etc. It changes depending on what screen you\'re on.\n' +
+      '• *Reply keyboard* (bottom bar, below where you type) — main navigation: Compose, Channels, Templates, etc. It changes depending on what screen you\'re on.\n' +
       '• *Inline buttons* (attached to a specific message) — choices tied to that exact message: picking a channel, confirming a send, editing a caption. Tapping one usually edits that same message rather than sending a new one, to keep the chat clean.\n\n' +
       'Only /start, /help, /status are typed commands you\'ll normally use — everything else, tap don\'t type.',
   },
   creating_posts: {
     title: '📝 Creating & sending posts',
     body:
-      'Tap 📝 New Post — the whole flow runs as one evolving control-panel message with a "Step X/5" header, ' +
+      'Tap 🎨 Compose — the whole flow runs as one evolving control-panel message with a "Step X/5" header, ' +
       'not a new chat message per tap. Pick a media type (photo/video/document/text/poll/album — or 📚 From Library to reuse media you\'ve sent before), send the content, add formatting/buttons, then preview it.\n\n' +
       'Channel selection happens *last*, only once you choose how to finish: 🚀 Send Now, ⏰ Schedule, 💾 Save as Template, 📝 Save as Draft (no channel yet), or 🚀+💾 Send & Save as Template. ' +
       'Every step has a real "⬅️ Back" to the previous step — backing out of channel-picking or scheduling returns to your Preview with everything intact, it never discards the post.',
@@ -57,7 +57,7 @@ const TOPICS = {
   media_library: {
     title: '📚 Media Library',
     body:
-      'Photos, videos, and documents you actually send get remembered automatically. Next time, pick 📚 From Library at the media-type step in New Post instead of re-uploading.',
+      'Photos, videos, and documents you actually send get remembered automatically. Next time, pick 📚 From Library at the media-type step in Compose instead of re-uploading.',
   },
   stats: {
     title: '📊 Stats: views & reactions',

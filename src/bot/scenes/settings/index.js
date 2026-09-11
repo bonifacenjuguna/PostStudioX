@@ -103,6 +103,15 @@ async function handleText(ctx) {
     ctx.session.step = null;
     await showTimezonePanel(ctx);
   }
+
+  if (step === 'awaiting_autodelete_custom') {
+    const { parseDurationMinutes } = require('../../../services/naturalTime');
+    const { minutes, error } = parseDurationMinutes(ctx.message.text);
+    if (error) return ctx.reply(error);
+    await settingsModel.set('auto_delete_defaults', { enabled: true, ttl_minutes: minutes });
+    ctx.session.step = null;
+    await showAutoDeletePanel(ctx);
+  }
 }
 
 async function registerHandlers(bot) {
@@ -113,15 +122,7 @@ async function registerHandlers(bot) {
 
   bot.action('set:defaults', async (ctx) => {
     await ctx.answerCbQuery();
-    const defaults = await settingsModel.get('defaults', {});
-    await ctx.reply(
-      `🎛 Defaults\n\nProtect content: ${defaults.protect_content ? 'ON' : 'OFF'}\nSilent send: ${defaults.disable_notification ? 'ON' : 'OFF'}`,
-      Markup.inlineKeyboard([
-        [Markup.button.callback(`Toggle Protect Content`, 'set:toggle:protect_content')],
-        [Markup.button.callback(`Toggle Silent Send`, 'set:toggle:disable_notification')],
-        backHomeRow('set:list'),
-      ])
-    );
+    await showDefaultsPanel(ctx);
   });
 
   bot.action(/^set:toggle:(.+)$/, async (ctx) => {
@@ -130,7 +131,23 @@ async function registerHandlers(bot) {
     const defaults = await settingsModel.get('defaults', {});
     defaults[key] = !defaults[key];
     await settingsModel.set('defaults', defaults);
-    try { await ctx.editMessageText(`✅ ${key} is now ${defaults[key] ? 'ON' : 'OFF'}.`); } catch (_) {}
+    await showDefaultsPanel(ctx, { edit: true });
+  });
+
+  bot.action('set:defaultchannels', async (ctx) => {
+    await ctx.answerCbQuery();
+    await showDefaultChannelsPanel(ctx);
+  });
+
+  bot.action(/^set:defaultchtoggle:(.+)$/, async (ctx) => {
+    const chatId = ctx.match[1];
+    await ctx.answerCbQuery();
+    const defaults = await settingsModel.get('defaults', {});
+    const selected = new Set(defaults.default_channel_ids || []);
+    if (selected.has(chatId)) selected.delete(chatId); else selected.add(chatId);
+    defaults.default_channel_ids = Array.from(selected);
+    await settingsModel.set('defaults', defaults);
+    await showDefaultChannelsPanel(ctx, { edit: true });
   });
 
   bot.action('set:timezone', async (ctx) => {
@@ -181,11 +198,7 @@ async function registerHandlers(bot) {
 
   bot.action('set:buttonstyle', async (ctx) => {
     await ctx.answerCbQuery();
-    await ctx.reply('Pick the default color for new buttons:', Markup.inlineKeyboard([
-      [Markup.button.callback('🔵 Primary', 'set:btnstyleset:bg_primary'), Markup.button.callback('🔴 Danger', 'set:btnstyleset:bg_danger')],
-      [Markup.button.callback('🟢 Success', 'set:btnstyleset:bg_success'), Markup.button.callback('⚪ Default', 'set:btnstyleset:default')],
-      backHomeRow('set:list'),
-    ]));
+    await showButtonStylePanel(ctx);
   });
 
   bot.action(/^set:btnstyleset:(.+)$/, async (ctx) => {
@@ -194,23 +207,25 @@ async function registerHandlers(bot) {
     const defaults = await settingsModel.get('defaults', {});
     defaults.button_style = style;
     await settingsModel.set('defaults', defaults);
-    try { await ctx.editMessageText(`✅ Default button style set.`); } catch (_) {}
+    await showButtonStylePanel(ctx, { edit: true });
   });
 
   bot.action('set:autodelete', async (ctx) => {
     await ctx.answerCbQuery();
-    await ctx.reply('Default auto-delete TTL for new posts:', Markup.inlineKeyboard([
-      [Markup.button.callback('Off', 'set:autodeleteset:0'), Markup.button.callback('10 min', 'set:autodeleteset:10')],
-      [Markup.button.callback('1 hr', 'set:autodeleteset:60'), Markup.button.callback('24 hr', 'set:autodeleteset:1440')],
-      backHomeRow('set:list'),
-    ]));
+    await showAutoDeletePanel(ctx);
   });
 
   bot.action(/^set:autodeleteset:(\d+)$/, async (ctx) => {
     const minutes = parseInt(ctx.match[1], 10);
     await ctx.answerCbQuery('Saved');
     await settingsModel.set('auto_delete_defaults', { enabled: minutes > 0, ttl_minutes: minutes || null });
-    try { await ctx.editMessageText(`✅ Default auto-delete set to ${minutes ? minutes + ' min' : 'off'}.`); } catch (_) {}
+    await showAutoDeletePanel(ctx, { edit: true });
+  });
+
+  bot.action('set:autodeletecustom', async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.session.step = 'awaiting_autodelete_custom';
+    await ctx.reply('Type a duration, e.g. "45m", "2h", "3 days":', Markup.inlineKeyboard([backHomeRow('set:autodelete')]));
   });
 
   bot.action('set:storage', async (ctx) => {
@@ -334,8 +349,120 @@ async function registerHandlers(bot) {
   bot.action('set:about', async (ctx) => {
     await ctx.answerCbQuery();
     const config = require('../../../config/env');
-    await ctx.reply(`ℹ️ About\n\nPostStudioX (@PostStudioXBot)\nVersion: v${config.botVersion}\nEnvironment: ${config.nodeEnv}`, Markup.inlineKeyboard([backHomeRow('set:list')]));
+    const channelsModel = require('../../../db/models/channels');
+    const [channels, sentCount, scheduledCount, templateCount] = await Promise.all([
+      channelsModel.list(),
+      savedItems.countByKind('post', 'sent'),
+      savedItems.countByKind('post', 'scheduled'),
+      savedItems.countByKind('template'),
+    ]);
+    const text =
+      `ℹ️ About PostStudioX\n\n` +
+      `Version: v${config.botVersion}\n` +
+      `Environment: ${config.nodeEnv}\n\n` +
+      `📊 YOUR USAGE\n` +
+      `📡 Channels connected: ${channels.length}\n` +
+      `🟢 Posts sent: ${sentCount}\n` +
+      `🕐 Currently scheduled: ${scheduledCount}\n` +
+      `🗂 Templates saved: ${templateCount}\n\n` +
+      `✨ FEATURES IN THIS VERSION\n` +
+      `Full formatting (bold, italic, blockquotes, expandable quotes, custom emoji, links, colored buttons) · ` +
+      `Loop Mode · Import via forward/link · Replace Links · Protect Content · Custom post signatures · ` +
+      `Natural-language scheduling · Structured error reporting`;
+    await ctx.reply(text, Markup.inlineKeyboard([
+      [Markup.button.callback('💽 Storage Details', 'set:storage')],
+      backHomeRow('set:list'),
+    ]));
   });
+}
+
+async function showDefaultsPanel(ctx, { edit = false } = {}) {
+  const defaults = await settingsModel.get('defaults', {});
+  const text =
+    `🎛 Defaults\n\n` +
+    'Applied automatically to every new post in 🎨 Compose, so you don\'t have to set them each time - still overridable per post.\n\n' +
+    `🔒 Protect content (block forward/save): ${defaults.protect_content ? 'ON' : 'OFF'}\n` +
+    `🔕 Silent send (no notification sound): ${defaults.disable_notification ? 'ON' : 'OFF'}\n` +
+    `🚫 Strip links automatically: ${defaults.strip_links ? 'ON' : 'OFF'}\n` +
+    `📡 Default channels pre-selected: ${defaults.default_channel_ids?.length ? defaults.default_channel_ids.length : 'none'}`;
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback(`${defaults.protect_content ? '✅' : '⬜'} Protect Content`, 'set:toggle:protect_content')],
+    [Markup.button.callback(`${defaults.disable_notification ? '✅' : '⬜'} Silent Send`, 'set:toggle:disable_notification')],
+    [Markup.button.callback(`${defaults.strip_links ? '✅' : '⬜'} Strip Links`, 'set:toggle:strip_links')],
+    [Markup.button.callback('📡 Choose Default Channels', 'set:defaultchannels')],
+    backHomeRow('set:list'),
+  ]);
+  if (edit) {
+    try { return await ctx.editMessageText(text, keyboard); } catch (_) { /* fall through */ }
+  }
+  return ctx.reply(text, keyboard);
+}
+
+async function showDefaultChannelsPanel(ctx, { edit = false } = {}) {
+  const channelsModel = require('../../../db/models/channels');
+  const channels = await channelsModel.list();
+  if (channels.length === 0) {
+    return ctx.reply('No channels registered yet — add one from 📡 Channels first.', Markup.inlineKeyboard([backHomeRow('set:defaults')]));
+  }
+  const defaults = await settingsModel.get('defaults', {});
+  const selected = new Set(defaults.default_channel_ids || []);
+  const rows = channels.map((c) => [
+    Markup.button.callback(`${selected.has(c.chat_id) ? '✅' : '⬜'} ${c.title || c.chat_id}`, `set:defaultchtoggle:${c.chat_id}`),
+  ]);
+  rows.push(backHomeRow('set:defaults'));
+  const text = 'Pre-select these channels every time you start 🎨 Compose (tap to toggle — still changeable per post):';
+  const keyboard = Markup.inlineKeyboard(rows);
+  if (edit) {
+    try { return await ctx.editMessageText(text, keyboard); } catch (_) { /* fall through */ }
+  }
+  return ctx.reply(text, keyboard);
+}
+
+function styleLabel(style) {
+  return { primary: '🔵 Primary', danger: '🔴 Danger', success: '🟢 Success' }[style] || '⚪ Default (no color)';
+}
+
+async function showButtonStylePanel(ctx, { edit = false } = {}) {
+  const defaults = await settingsModel.get('defaults', {});
+  const current = defaults.button_style || 'default';
+  const text =
+    `🎨 Button Style Defaults\n\n` +
+    `Current default: ${styleLabel(current)}\n\n` +
+    'This is the color new buttons in 🎨 Compose start with (Bot API 9.4\'s button color feature) - ' +
+    'still changeable per button when you build a post, this just sets the starting pick so you don\'t re-tap it every time.';
+  const rows = ['primary', 'danger', 'success', 'default'].map((s) => [
+    Markup.button.callback(`${current === s ? '✅ ' : ''}${styleLabel(s)}`, `set:btnstyleset:${s}`),
+  ]);
+  rows.push(backHomeRow('set:list'));
+  const keyboard = Markup.inlineKeyboard(rows);
+  if (edit) {
+    try { return await ctx.editMessageText(text, keyboard); } catch (_) { /* fall through */ }
+  }
+  return ctx.reply(text, keyboard);
+}
+
+async function showAutoDeletePanel(ctx, { edit = false } = {}) {
+  const ad = await settingsModel.get('auto_delete_defaults', {});
+  const currentLabel = ad.enabled && ad.ttl_minutes
+    ? (ad.ttl_minutes < 60 ? `${ad.ttl_minutes} min` : ad.ttl_minutes < 1440 ? `${(ad.ttl_minutes / 60).toFixed(1)} hr` : `${(ad.ttl_minutes / 1440).toFixed(1)} day(s)`)
+    : 'Off';
+  const text =
+    `🗑 Auto-delete Defaults\n\n` +
+    `Current default: ${currentLabel}\n\n` +
+    'New posts in 🎨 Compose start with this auto-delete timer already set (still adjustable per post). ' +
+    'Doesn\'t affect 🔁 Loop Mode posts - those manage their own delete timing per-post.';
+  const presets = [[0, 'Off'], [10, '10 min'], [60, '1 hr'], [1440, '24 hr'], [10080, '1 week']];
+  const rows = [];
+  for (let i = 0; i < presets.length; i += 2) {
+    rows.push(presets.slice(i, i + 2).map(([mins, label]) => Markup.button.callback(`${(ad.enabled ? ad.ttl_minutes : 0) === mins ? '✅ ' : ''}${label}`, `set:autodeleteset:${mins}`)));
+  }
+  rows.push([Markup.button.callback('⌨️ Custom Duration', 'set:autodeletecustom')]);
+  rows.push(backHomeRow('set:list'));
+  const keyboard = Markup.inlineKeyboard(rows);
+  if (edit) {
+    try { return await ctx.editMessageText(text, keyboard); } catch (_) { /* fall through */ }
+  }
+  return ctx.reply(text, keyboard);
 }
 
 async function showWatchdogPanel(ctx, { edit = false } = {}) {

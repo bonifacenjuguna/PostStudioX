@@ -38,9 +38,8 @@ function withEmergencyStop(rows) {
 // Home reply keyboard - the persistent bottom bar shown outside any wizard.
 function homeReplyKeyboard() {
   return Markup.keyboard([
-    ['📝 New Post', '📡 Channels', '🗂 Templates'],
-    ['📁 My Folders', '⏰ Scheduled', '📜 History'],
-    ['⚙️ Settings'],
+    ['🎨 Compose', '📡 Channels', '🗂 Templates'],
+    ['⏰ Scheduled', '📜 History', '⚙️ Settings'],
   ]).resize();
 }
 

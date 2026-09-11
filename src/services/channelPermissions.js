@@ -8,14 +8,14 @@
 // permission that actually matters for this bot to function.
 
 const RELEVANT_PERMISSIONS = [
-  { key: 'can_post_messages', label: '📝 Post messages', critical: true },
-  { key: 'can_edit_messages', label: '✏️ Edit messages' },
-  { key: 'can_delete_messages', label: '🗑 Delete messages' },
-  { key: 'can_pin_messages', label: '📌 Pin messages' },
-  { key: 'can_invite_users', label: '🔗 Invite users' },
-  { key: 'can_change_info', label: 'ℹ️ Change channel info' },
-  { key: 'can_manage_chat', label: '🛠 Manage chat' },
-  { key: 'can_promote_members', label: '⬆️ Add new admins' },
+  { key: 'can_post_messages', label: '📝 Post messages', critical: true, preselect: true },
+  { key: 'can_edit_messages', label: '✏️ Edit messages', preselect: true },
+  { key: 'can_delete_messages', label: '🗑 Delete messages', preselect: true },
+  { key: 'can_pin_messages', label: '📌 Pin messages', preselect: true },
+  { key: 'can_invite_users', label: '🔗 Invite users (for loop/repost links)', preselect: true },
+  { key: 'can_change_info', label: 'ℹ️ Change channel info', preselect: false },
+  { key: 'can_manage_chat', label: '🛠 Manage chat', preselect: false },
+  { key: 'can_promote_members', label: '⬆️ Add new admins', preselect: false },
 ];
 
 // True only if the bot can actually publish - creator always can; an
@@ -64,4 +64,48 @@ function formatPermissions(member) {
   return `${header}\n\n${lines.join('\n')}`;
 }
 
-module.exports = { isEffectivelyAdmin, describeIssue, formatPermissions, RELEVANT_PERMISSIONS };
+// Plain snapshot of { can_post_messages: true, ... } for every permission we
+// track, to persist on the channels row (admin_rights column) so Manage
+// Channels can render "granted vs missing" without an extra live API call
+// on every screen view.
+function snapshotRights(member) {
+  const snapshot = {};
+  for (const { key } of RELEVANT_PERMISSIONS) {
+    snapshot[key] = member ? member[key] === true : false;
+  }
+  return snapshot;
+}
+
+// Short "granted / missing" two-line summary, for compact display (e.g. the
+// channel list row or a card) rather than the full breakdown above.
+function grantedVsMissing(rightsSnapshot) {
+  const granted = [];
+  const missing = [];
+  for (const { key, label } of RELEVANT_PERMISSIONS) {
+    (rightsSnapshot?.[key] ? granted : missing).push(label);
+  }
+  return { granted, missing };
+}
+
+// Builds the ChatAdministratorRights object Telegram's native chat picker
+// (request_chat button) uses to PRESELECT which admin toggles are already
+// switched on when the owner is asked to confirm - this is what makes the
+// picker feel like "Add Bot to a Channel" instead of a blank permissions
+// form. Anything not listed defaults to off.
+function buildBotAdministratorRights() {
+  const rights = { is_anonymous: false };
+  for (const { key, preselect } of RELEVANT_PERMISSIONS) {
+    rights[key] = !!preselect;
+  }
+  return rights;
+}
+
+module.exports = {
+  isEffectivelyAdmin,
+  describeIssue,
+  formatPermissions,
+  snapshotRights,
+  grantedVsMissing,
+  buildBotAdministratorRights,
+  RELEVANT_PERMISSIONS,
+};

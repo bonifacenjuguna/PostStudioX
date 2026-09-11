@@ -96,6 +96,9 @@ const safeRedis = {
   del: (key) => withTimeout(getRedis().del(key)),
   ping: () => withTimeout(getRedis().ping()),
   info: (section) => withTimeout(getRedis().info(section)),
+  lpush: (key, value) => withTimeout(getRedis().lpush(key, value)),
+  rpop: (key) => withTimeout(getRedis().rpop(key)),
+  lrange: (key, start, stop) => withTimeout(getRedis().lrange(key, start, stop)),
 };
 
 // BullMQ requires `maxRetriesPerRequest: null` on the connections it's

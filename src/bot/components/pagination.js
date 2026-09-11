@@ -1,10 +1,10 @@
 const { Markup } = require('telegraf');
 
-const PAGE_SIZE = 8;
+const PAGE_SIZE = 8; // default, used where a screen doesn't need a different size
 const JUMP_THRESHOLD_PAGES = 4;
 
-function paginationRow(currentPage, totalItems, callbackPrefix) {
-  const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
+function paginationRow(currentPage, totalItems, callbackPrefix, pageSize = PAGE_SIZE) {
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
   const row = [];
 
   if (currentPage > 0) {
@@ -22,8 +22,8 @@ function paginationRow(currentPage, totalItems, callbackPrefix) {
   return rows;
 }
 
-function offsetFor(page) {
-  return page * PAGE_SIZE;
+function offsetFor(page, pageSize = PAGE_SIZE) {
+  return page * pageSize;
 }
 
 // v1.1.0 FIX (#6): "🔢 Jump to page" rendered by paginationRow() above had

@@ -20,7 +20,6 @@ const channels = require('./scenes/channels');
 const createPost = require('./scenes/create-post');
 const editPost = require('./scenes/edit-post');
 const templates = require('./scenes/templates');
-const folders = require('./scenes/folders');
 const scheduled = require('./scenes/scheduled');
 const history = require('./scenes/history');
 const settings = require('./scenes/settings');
@@ -60,7 +59,6 @@ function buildBot() {
     createPost,
     editPost,
     templates,
-    folders,
     scheduled,
     history,
     settings,
@@ -73,18 +71,23 @@ function buildBot() {
   createPost.registerHandlers(bot);
   editPost.registerHandlers(bot);
   templates.registerHandlers(bot, scenes);
-  folders.registerHandlers(bot);
   scheduled.registerHandlers(bot);
   history.registerHandlers(bot);
   settings.registerHandlers(bot);
 
   bot.catch((err, ctx) => {
-    console.error(`[bot] Unhandled error for update ${ctx.update.update_id}:`, err);
+    const scene = ctx.session?.scene || ctx.updateType || 'unknown';
+    console.error(`[bot] Unhandled error for update ${ctx.update.update_id} (scene: ${scene}):`, err);
     const watchdogLog = require('../db/models/watchdogLog');
     watchdogLog
-      .record({ level: 'warning', category: 'bot', message: `Unhandled error: ${err.message}` })
+      .record({ level: 'warning', category: 'bot', message: `Unhandled error in ${scene}: ${err.message}` })
       .catch(() => {});
-    ctx.reply(`🔴 Something went wrong: ${err.message}\n\n(Logged to watchdog events - Settings → Watchdog → Recent Events.)`).catch(() => {});
+    const { logAction } = require('../services/actionErrors');
+    logAction({ scene, step: 'unhandled', attempted: `process a ${ctx.updateType} update`, error: err, chatId: ctx.chat?.id })
+      .then((msg) => ctx.reply(`${msg}\n\n(Also logged - Settings → Watchdog → Recent Events.)`).catch(() => {}))
+      .catch(() => {
+        ctx.reply(`🔴 Error in ${scene}\nTried to: process a ${ctx.updateType} update\nReason: ${err.message}`).catch(() => {});
+      });
   });
 
   return bot;

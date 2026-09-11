@@ -12,33 +12,29 @@ const { flowReplyKeyboard, homeReplyKeyboard, backCancelRow } = require('../../c
 const { clearSession } = require('../../middleware/session');
 const { DateTime } = require('luxon');
 const settingsModel = require('../../../db/models/settings');
+const { parseNaturalTime, quickPickPresets } = require('../../../services/naturalTime');
+const { logAction } = require('../../../services/actionErrors');
 
 // ---------------------------------------------------------------------------
-// v1.2.0 REDESIGN
+// v2.0.0 REDESIGN — renamed from "New Post" to "Compose" (the old name and
+// layout are explicitly what this rebuild moves away from), rebuilt around:
+// natural-language scheduling in the owner's own timezone (no more typing
+// UTC by hand), a safe fallback when no channel is connected yet (never a
+// dead-end message), per-phrase formatting instead of whole-caption-only,
+// and every Telegram entity type the formatter now supports.
 //
-// Previously every step of New Post sent a brand new chat message, so a
-// single post could leave 10-15 messages scattered through the chat by the
-// time you finished - hard to scan back through, not something you'd want
-// to hand a client using this as a commercial tool.
-//
-// Now the whole wizard lives in ONE "control panel" message that gets
-// *edited in place* step to step (showStep, below) - it feels like a
-// single app screen advancing, not a chat log. The only messages that
-// can't be folded into that panel are the ones Telegram itself requires to
-// be their own message (an actual photo/video/poll you send, and the real
-// preview of your post) - those appear inline as themselves, with the
-// control panel picking back up right after.
-//
-// Every step also shows a "Step X/5 — Name" header so you always know
-// where you are and how much is left, and has a real "⬅️ Back" that
-// returns to the *previous* step specifically - not a blanket trip Home.
+// The single "control panel" message architecture from v1.2.0 (edited in
+// place step to step, rather than a new chat message per step) is kept —
+// it already achieves the edit-in-place goal the rest of this rebuild is
+// applying everywhere else, so redoing it from scratch would be a step
+// backward, not forward.
 // ---------------------------------------------------------------------------
 
 const TOTAL_STEPS = 5;
 const STEP_LABELS = { 1: 'Post Type', 2: 'Content', 3: 'Format & Buttons', 4: 'Preview', 5: 'Finish' };
 
 function header(stepNum) {
-  return `🆕 NEW POST — Step ${stepNum}/${TOTAL_STEPS} — ${STEP_LABELS[stepNum]}`;
+  return `🎨 COMPOSE — Step ${stepNum}/${TOTAL_STEPS} — ${STEP_LABELS[stepNum]}`;
 }
 
 // Edits the single ongoing "control panel" message in place when possible;
@@ -67,8 +63,54 @@ function freshDraft() {
   return { channelIds: [], mediaType: null, mediaItems: [], caption: '', entities: [], buttons: [], options: {} };
 }
 
+function ensureLoopDefaults(draft) {
+  if (!draft.options.loop) {
+    draft.options.loop = { enabled: false, stayMinutes: null, gapMinutes: null, maxCycles: null };
+  }
+  return draft.options.loop;
+}
+
+// Applies the ⚙️ Settings → Defaults "strip links automatically" toggle
+// right when a caption is captured, so the preview the owner sees already
+// reflects it - rather than a surprise change happening silently at send time.
+function applyStripLinksDefault(draft) {
+  if (!draft.options.strip_links_default || !draft.caption) return;
+  const stripped = stripLinks(draft.caption, draft.entities);
+  draft.caption = stripped.text;
+  draft.entities = stripped.entities;
+}
+
+// Translates the UI-facing draft.options.loop shape into the loop_config
+// column's shape (see migration 003_v2_redesign.sql) - only when actually
+// enabled and both durations are set, since a half-configured loop
+// shouldn't silently start behaving unexpectedly.
+function buildLoopConfig(draft) {
+  const loop = draft.options.loop;
+  if (!loop?.enabled || !loop.stayMinutes || !loop.gapMinutes) return null;
+  return {
+    enabled: true,
+    stay_seconds: loop.stayMinutes * 60,
+    gap_seconds: loop.gapMinutes * 60,
+    max_cycles: loop.maxCycles ?? null,
+    cycles_done: 0,
+    active: true,
+  };
+}
+
 async function enter(ctx) {
-  ctx.session = { scene: 'create-post', step: 'media_type', draft: freshDraft() };
+  const draft = freshDraft();
+  // v2.0.0 FIX: ⚙️ Settings → 🎛 Defaults was previously never actually
+  // read anywhere - every toggle in there was cosmetic. Applied here so
+  // it's real, still fully overridable per post below.
+  const defaults = await settingsModel.get('defaults', {});
+  if (defaults.protect_content) draft.options.protect_content = true;
+  if (defaults.disable_notification) draft.options.disable_notification = true;
+  if (defaults.strip_links) draft.options.strip_links_default = true;
+  if (defaults.default_channel_ids?.length) draft.channelIds = [...defaults.default_channel_ids];
+  const autoDelete = await settingsModel.get('auto_delete_defaults', {});
+  if (autoDelete.enabled && autoDelete.ttl_minutes) draft.options.autoDeleteMinutes = autoDelete.ttl_minutes;
+
+  ctx.session = { scene: 'create-post', step: 'media_type', draft };
   await ctx.reply('📝 Starting a new post.', flowReplyKeyboard());
   await showMediaTypeStep(ctx);
 }
@@ -93,6 +135,7 @@ function mediaTypeKeyboard() {
     [Markup.button.callback('📄 Document', 'cp:type:document'), Markup.button.callback('💬 Text only', 'cp:type:text')],
     [Markup.button.callback('📊 Poll', 'cp:type:poll'), Markup.button.callback('🖼🎥 Media Group', 'cp:type:media_group')],
     [Markup.button.callback('📚 From Library', 'cp:library')],
+    [Markup.button.callback('📥 Import Existing Post', 'cp:import')],
     [Markup.button.callback('❌ Cancel', 'nav:cancel')],
   ]);
 }
@@ -100,14 +143,27 @@ function mediaTypeKeyboard() {
 function formattingKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback('Bold', 'cp:fmt:bold'), Markup.button.callback('Italic', 'cp:fmt:italic'), Markup.button.callback('Underline', 'cp:fmt:underline')],
-    [Markup.button.callback('Strike', 'cp:fmt:strike'), Markup.button.callback('Spoiler', 'cp:fmt:spoiler'), Markup.button.callback('Code', 'cp:fmt:code')],
-    [Markup.button.callback('🔗 Link', 'cp:fmt:link'), Markup.button.callback('💬 Quote', 'cp:fmt:quote')],
-    [Markup.button.callback('🚫 Remove All Links', 'cp:fmt:striplinks')],
+    [Markup.button.callback('Strike', 'cp:fmt:strikethrough'), Markup.button.callback('Spoiler', 'cp:fmt:spoiler'), Markup.button.callback('Code', 'cp:fmt:code')],
+    [Markup.button.callback('💬 Quote', 'cp:fmt:blockquote'), Markup.button.callback('💬 Expandable Quote', 'cp:fmt:expandable_blockquote')],
+    [Markup.button.callback('🔗 Link', 'cp:fmt:link')],
+    [Markup.button.callback('🚫 Remove All Links', 'cp:fmt:striplinks'), Markup.button.callback('🔀 Replace All Links', 'cp:fmt:replacelinks')],
     [Markup.button.callback('🔘 Add Buttons', 'cp:buttons:add')],
+    [Markup.button.callback('❓ Formatting Help', 'cp:fmt:help')],
     [Markup.button.callback('✅ Done, continue', 'cp:fmt:done')],
     backCancelRow('cp:back:content'),
   ]);
 }
+
+const FORMAT_HELP_TEXT =
+  '❓ FORMATTING HELP\n\n' +
+  'Fastest way: type shorthand directly in your caption — no buttons needed:\n' +
+  '**bold**  __italic__  ~~strike~~  ++underline++  ||spoiler||\n' +
+  '`code`  ```code block```\n' +
+  '>>blockquote<<  >>>expandable blockquote<<<\n' +
+  '[link text](https://example.com)\n' +
+  '[mention](tg://user?id=123456789) — mentions a user with no @username\n' +
+  '{emoji:5368324170671202286}😀{/emoji} — custom emoji (fallback glyph shown to non-Premium viewers)\n\n' +
+  'Or use the buttons: tap a style, then send the exact word/phrase from your caption to apply it to just that part (or send ALL to apply to everything).';
 
 function pollOptionsKeyboard(draft) {
   const p = draft.options.poll;
@@ -134,13 +190,113 @@ async function askForContent(ctx) {
   await showStep(ctx, `${header(2)}\n\n${prompts[mediaType] || 'Send your content.'}`, Markup.inlineKeyboard([backCancelRow('cp:back:mediatype')]));
 }
 
+// Maps a real Telegram Message object (from a forward, or fetched via
+// forwardMessage when importing by link) into our draft shape. Used by the
+// Import feature - this is the whole reason importing goes through
+// forward/link rather than copy-paste: the Message object carries the real
+// entities array (hyperlinks, blockquotes, everything), which manual
+// copy-paste of visible text cannot reproduce.
+function extractDraftFieldsFromMessage(msg) {
+  const fields = { entities: msg.caption_entities || msg.entities || [] };
+  if (msg.photo) {
+    fields.mediaType = 'photo';
+    fields.mediaItems = [{ file_id: msg.photo[msg.photo.length - 1].file_id, type: 'photo' }];
+    fields.caption = msg.caption || '';
+  } else if (msg.video) {
+    fields.mediaType = 'video';
+    fields.mediaItems = [{ file_id: msg.video.file_id, type: 'video' }];
+    fields.caption = msg.caption || '';
+  } else if (msg.document) {
+    fields.mediaType = 'document';
+    fields.mediaItems = [{ file_id: msg.document.file_id, type: 'document' }];
+    fields.caption = msg.caption || '';
+  } else {
+    fields.mediaType = 'text';
+    fields.mediaItems = [];
+    fields.caption = msg.text || '';
+  }
+  return fields;
+}
+
+const TME_LINK_PATTERN = /^(?:https?:\/\/)?t\.me\/(c\/(\d+)|([A-Za-z0-9_]+))\/(\d+)/i;
+
+async function handleImportInput(ctx) {
+  const draft = ctx.session.draft;
+
+  // Case 1: forwarded directly into this chat - everything needed is
+  // already on ctx.message, no extra API call required.
+  if (ctx.message.forward_from_chat || ctx.message.forward_origin?.chat) {
+    const fields = extractDraftFieldsFromMessage(ctx.message);
+    const sourceChat = ctx.message.forward_from_chat || ctx.message.forward_origin.chat;
+    Object.assign(draft, fields);
+    draft.importedFrom = { chat_id: String(sourceChat.id), message_id: ctx.message.forward_from_message_id || ctx.message.message_id, via: 'forward' };
+    ctx.session.step = 'formatting';
+    await showStep(
+      ctx,
+      `${header(3)}\n\n📥 Imported. Formatting, media, and links carried over as-is — use 🔀 Replace All Links below if you want to swap the links, or edit anything else.`,
+      formattingKeyboard()
+    );
+    return true;
+  }
+
+  // Case 2: a t.me link to a post in one of our own registered channels.
+  const text = ctx.message.text?.trim();
+  if (!text) return false;
+  const match = text.match(TME_LINK_PATTERN);
+  if (!match) return false;
+
+  const messageId = parseInt(match[4], 10);
+  let sourceChatId;
+  if (match[2]) {
+    sourceChatId = `-100${match[2]}`; // t.me/c/<internal_id>/<msg_id> form
+  } else {
+    const channel = await channelsModel.list().then((list) => list.find((c) => c.username?.toLowerCase() === match[3].toLowerCase()));
+    if (!channel) {
+      await ctx.reply(`🔴 "${match[3]}" isn't one of your registered channels, so I can't read that post — only channels the bot manages can be imported from.`);
+      return true;
+    }
+    sourceChatId = channel.chat_id;
+  }
+
+  try {
+    // forwardMessage (not copyMessage) is used deliberately here: it's the
+    // only Bot API call that returns the FULL Message object, entities
+    // included - copyMessage only returns a bare message_id. The forwarded
+    // copy lands in this owner<->bot chat as a staging step, then gets
+    // deleted once its content is captured, so no forward-tagged clutter
+    // is left behind for the owner to see.
+    const fetched = await ctx.telegram.forwardMessage(ctx.chat.id, sourceChatId, messageId);
+    const fields = extractDraftFieldsFromMessage(fetched);
+    Object.assign(draft, fields);
+    draft.importedFrom = { chat_id: String(sourceChatId), message_id: messageId, via: 'link' };
+    await ctx.telegram.deleteMessage(ctx.chat.id, fetched.message_id).catch(() => {});
+    ctx.session.step = 'formatting';
+    await showStep(
+      ctx,
+      `${header(3)}\n\n📥 Imported. Formatting, media, and links carried over as-is — use 🔀 Replace All Links below if you want to swap the links, or edit anything else.`,
+      formattingKeyboard()
+    );
+  } catch (err) {
+    const msg = await logAction({ scene: 'create-post', step: 'import', attempted: `read post ${messageId} from ${sourceChatId} via link`, error: err });
+    await ctx.reply(msg);
+  }
+  return true;
+}
+
 async function handleText(ctx) {
   const step = ctx.session.step;
   const draft = ctx.session.draft;
   const text = ctx.message.text;
   if (!draft) {
-    await ctx.reply('⏱ This New Post session has expired or already finished. Start a new one with 📝 New Post.', homeReplyKeyboard());
+    await ctx.reply('⏱ This Compose session has expired or already finished. Start a new one with 🎨 Compose.', homeReplyKeyboard());
     ctx.session = {};
+    return;
+  }
+
+  if (step === 'awaiting_import') {
+    const handled = await handleImportInput(ctx);
+    if (handled) return;
+    await ctx.reply('That didn\'t look like a forward or a t.me link — try again, or tap Back to pick a post type instead.');
     return;
   }
 
@@ -155,6 +311,7 @@ async function handleText(ctx) {
       const { text: parsedText, entities } = parseShorthand(text);
       draft.caption = parsedText;
       draft.entities = entities;
+      applyStripLinksDefault(draft);
       ctx.session.step = 'formatting';
       await showStep(ctx, `${header(3)}\n\nAdd formatting, links, or buttons — or tap Done.`, formattingKeyboard());
       return;
@@ -183,6 +340,7 @@ async function handleText(ctx) {
     const { text: parsedText, entities } = parseShorthand(text === '/skip' ? '' : text);
     draft.caption = parsedText;
     draft.entities = entities;
+    applyStripLinksDefault(draft);
     ctx.session.step = 'formatting';
     await showStep(ctx, `${header(3)}\n\nAdd formatting, links, or buttons — or tap Done.`, formattingKeyboard());
     return;
@@ -223,11 +381,70 @@ async function handleText(ctx) {
       ctx.session.buttonDraft.url = text.trim();
     }
     ctx.session.step = 'awaiting_button_style';
-    await showStep(ctx, `${header(3)}\n\nPick a color style for this button:`, Markup.inlineKeyboard([
-      [Markup.button.callback('🔵 Primary', 'cp:btnstyle:bg_primary'), Markup.button.callback('🔴 Danger', 'cp:btnstyle:bg_danger')],
-      [Markup.button.callback('🟢 Success', 'cp:btnstyle:bg_success'), Markup.button.callback('⚪ Default', 'cp:btnstyle:default')],
+    const defaultStyle = (await settingsModel.get('defaults', {})).button_style || 'default';
+    const mark = (s) => (s === defaultStyle ? '⭐ ' : '');
+    await showStep(ctx, `${header(3)}\n\nPick a color style for this button (⭐ = your Settings default):`, Markup.inlineKeyboard([
+      [Markup.button.callback(`${mark('primary')}🔵 Primary`, 'cp:btnstyle:primary'), Markup.button.callback(`${mark('danger')}🔴 Danger`, 'cp:btnstyle:danger')],
+      [Markup.button.callback(`${mark('success')}🟢 Success`, 'cp:btnstyle:success'), Markup.button.callback(`${mark('default')}⚪ Default`, 'cp:btnstyle:default')],
       backCancelRow('cp:back:formatting'),
     ]));
+    return;
+  }
+
+  if (step === 'awaiting_loop_stay_custom' || step === 'awaiting_loop_gap_custom') {
+    const { parseDurationMinutes } = require('../../../services/naturalTime');
+    const { minutes, error } = parseDurationMinutes(text);
+    if (error) {
+      await ctx.reply(error);
+      return;
+    }
+    const loop = ensureLoopDefaults(draft);
+    loop[step === 'awaiting_loop_stay_custom' ? 'stayMinutes' : 'gapMinutes'] = minutes;
+    ctx.session.step = 'formatting'; // harmless placeholder, immediately overwritten by showStep below
+    await showStep(ctx, loopMenuText(loop), loopMenuKeyboard(loop));
+    return;
+  }
+
+  if (step === 'awaiting_loop_cycles') {
+    const n = parseInt(text.trim(), 10);
+    if (!Number.isInteger(n) || n < 1) {
+      await ctx.reply('Send a whole number of 1 or more, e.g. 5.');
+      return;
+    }
+    const loop = ensureLoopDefaults(draft);
+    loop.maxCycles = n;
+    await showStep(ctx, loopMenuText(loop), loopMenuKeyboard(loop));
+    return;
+  }
+
+  if (step === 'awaiting_format_target') {
+    const target = text.trim();
+    const applyWhole = target.toUpperCase() === 'ALL';
+    const idx = applyWhole ? 0 : draft.caption.indexOf(target);
+    if (!applyWhole && idx === -1) {
+      await ctx.reply(`Couldn't find "${target}" in your caption exactly as typed — try again, or send ALL for the whole text.`);
+      return;
+    }
+    const length = applyWhole ? draft.caption.length : target.length;
+    draft.entities.push({ type: ctx.session.formatAction, offset: idx, length });
+    delete ctx.session.formatAction;
+    ctx.session.step = 'formatting';
+    await showStep(ctx, `${header(3)}\n\n✅ Applied. Add more, or tap Done.`, formattingKeyboard());
+    return;
+  }
+
+  if (step === 'awaiting_replace_links_url') {
+    const { replaceAllLinks } = require('../../../services/telegramFormatter');
+    const newUrl = text.trim();
+    const result = replaceAllLinks(draft.caption, draft.entities, newUrl);
+    draft.caption = result.text;
+    draft.entities = result.entities;
+    ctx.session.step = 'formatting';
+    await showStep(
+      ctx,
+      `${header(3)}\n\n${result.linksFound ? `🔀 All links replaced with ${newUrl}.` : 'No links were found to replace — nothing changed.'}`,
+      formattingKeyboard()
+    );
     return;
   }
 
@@ -251,7 +468,14 @@ async function handleText(ctx) {
 async function handleMedia(ctx) {
   const step = ctx.session.step;
   const draft = ctx.session.draft;
-  if (step !== 'awaiting_content' || !draft) return;
+  if (!draft) return;
+
+  if (step === 'awaiting_import') {
+    await handleImportInput(ctx);
+    return;
+  }
+
+  if (step !== 'awaiting_content') return;
 
   if (draft.mediaType === 'photo' && ctx.message.photo) {
     const largest = ctx.message.photo[ctx.message.photo.length - 1];
@@ -284,6 +508,54 @@ async function handleMedia(ctx) {
   }
 }
 
+function formatMinutes(minutes) {
+  if (!minutes) return 'not set';
+  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 1440) return `${(minutes / 60).toFixed(minutes % 60 ? 1 : 0)} hr`;
+  if (minutes < 10080) return `${(minutes / 1440).toFixed(minutes % 1440 ? 1 : 0)} day(s)`;
+  return `${(minutes / 10080).toFixed(1)} week(s)`;
+}
+
+const LOOP_DURATION_PRESETS = [10, 30, 60, 180, 1440, 10080]; // minutes: 10m,30m,1h,3h,1d,1w
+
+function loopMenuKeyboard(loop) {
+  const rows = [];
+  const durationRow = (prefix) => {
+    const r = [];
+    for (let i = 0; i < LOOP_DURATION_PRESETS.length; i += 3) {
+      rows.push(
+        LOOP_DURATION_PRESETS.slice(i, i + 3).map((m) => Markup.button.callback(formatMinutes(m), `cp:loop:${prefix}:${m}`))
+      );
+    }
+    rows.push([Markup.button.callback('⌨️ Type a custom duration', `cp:loop:${prefix}custom`)]);
+  };
+  rows.push([Markup.button.callback('— Set "stay up" duration —', 'nav:noop')]);
+  durationRow('stay');
+  rows.push([Markup.button.callback('— Set "repost gap" duration —', 'nav:noop')]);
+  durationRow('gap');
+  rows.push([
+    Markup.button.callback(`${loop.maxCycles == null ? '✅' : '⬜'} Infinite`, 'cp:loop:cycles:infinite'),
+    Markup.button.callback(`${loop.maxCycles != null ? '✅' : '⬜'} Set a number`, 'cp:loop:cycles:set'),
+  ]);
+  rows.push([Markup.button.callback(loop.enabled ? '🛑 Disable Loop' : '✅ Enable Loop', 'cp:loop:toggle')]);
+  rows.push(backCancelRow('cp:finish:backpreview'));
+  return Markup.inlineKeyboard(rows);
+}
+
+function loopMenuText(loop) {
+  return (
+    `${header(4)}\n\n🔁 LOOP MODE\n\n` +
+    `Stay up: ${formatMinutes(loop.stayMinutes)}\n` +
+    `Repost gap: ${formatMinutes(loop.gapMinutes)}\n` +
+    `Cycles: ${loop.maxCycles == null ? 'Infinite (until you stop it)' : loop.maxCycles}\n` +
+    `Status: ${loop.enabled ? '✅ Enabled' : '⬜ Disabled'}\n\n` +
+    (loop.enabled && (!loop.stayMinutes || !loop.gapMinutes)
+      ? '⚠️ Set both durations before this can actually run.\n\n'
+      : '') +
+    'Post goes live → stays up → deletes → waits the gap → reposts. Repeats per your cycle setting.'
+  );
+}
+
 async function buildPreviewPanel(draft) {
   const validation = await validateDraft(draft, { requireChannels: false });
   const rows = [];
@@ -298,6 +570,13 @@ async function buildPreviewPanel(draft) {
       text += '\n\n💡 HEADS UP:\n' + validation.warnings.map((w) => `• ${w}`).join('\n');
     }
     rows.push([Markup.button.callback('✏️ Edit Caption', 'cp:edit:caption'), Markup.button.callback('🔘 Edit Buttons', 'cp:buttons:add')]);
+    rows.push([Markup.button.callback('▫️▫️ OPTIONS ▫️▫️', 'nav:noop')]);
+    rows.push([
+      Markup.button.callback(`${draft.options.protect_content ? '🔒' : '🔓'} Protect Content: ${draft.options.protect_content ? 'On' : 'Off'}`, 'cp:opt:toggle:protect_content'),
+    ]);
+    rows.push([
+      Markup.button.callback(`🔁 Loop Mode: ${draft.options.loop?.enabled ? 'On' : 'Off'}`, 'cp:loop:menu'),
+    ]);
     rows.push([Markup.button.callback('▫️▫️ SAVE ▫️▫️', 'nav:noop')]);
     rows.push([Markup.button.callback('💾 Save as Template', 'cp:save:template'), Markup.button.callback('📝 Save as Draft', 'cp:save:draft')]);
     rows.push([Markup.button.callback('▫️▫️ SEND ▫️▫️', 'nav:noop')]);
@@ -346,7 +625,7 @@ async function doSend(ctx, { undoWindow = true } = {}) {
   const item = await savedItems.create({
     kind: 'post', status: 'draft', channelIds: draft.channelIds, mediaType: draft.mediaType,
     mediaItems: draft.mediaItems, caption: draft.caption, entities: draft.entities,
-    buttons: draft.buttons, options: draft.options,
+    buttons: draft.buttons, options: draft.options, loopConfig: buildLoopConfig(draft), importedFrom: draft.importedFrom || null,
   });
   const names = await channelNames(draft.channelIds);
 
@@ -378,41 +657,73 @@ async function doSend(ctx, { undoWindow = true } = {}) {
   }
 }
 
+async function scheduleTimeKeyboard() {
+  const presets = quickPickPresets();
+  const rows = [];
+  for (let i = 0; i < presets.length; i += 2) {
+    rows.push(
+      presets.slice(i, i + 2).map((p, j) => Markup.button.callback(p.label, `cp:schedpick:${i + j}`))
+    );
+  }
+  rows.push(backCancelRow('cp:finish:backpreview'));
+  return Markup.inlineKeyboard(rows);
+}
+
+async function showScheduleStep(ctx) {
+  ctx.session.step = 'awaiting_schedule_time';
+  const tz = await settingsModel.get('timezone', 'UTC');
+  const now = DateTime.now().setZone(tz);
+  await showStep(
+    ctx,
+    `${header(5)}\n\nRight now it's ${now.toFormat('EEE d MMM, HH:mm')} in your timezone (${tz}).\n\n` +
+      'Pick a quick option, or just type when — e.g. "tomorrow 9am", "friday 6pm", "in 2 hours".',
+    await scheduleTimeKeyboard()
+  );
+}
+
 async function handleScheduleInput(ctx, text) {
   const tz = await settingsModel.get('timezone', 'UTC');
-  const dt = DateTime.fromFormat(text.trim(), 'yyyy-MM-dd HH:mm', { zone: tz });
-  if (!dt.isValid) {
-    await ctx.reply(`Could not parse that. Use format: 2026-09-05 18:30 (in ${tz})`);
+  const { dt, error } = parseNaturalTime(text, tz);
+  if (error) {
+    await ctx.reply(`${error}`);
     return;
   }
-  if (dt.toUTC().toMillis() <= Date.now()) {
-    await ctx.reply('That time is in the past — send a future date/time.');
+  await finalizeSchedule(ctx, dt, tz);
+}
+
+async function finalizeSchedule(ctx, dtUtc, tz) {
+  if (dtUtc.toMillis() <= Date.now()) {
+    await ctx.reply('That works out to a time in the past — try again with a future time.');
     return;
   }
   const draft = ctx.session.draft;
   const item = await savedItems.create({
     kind: 'post', status: 'scheduled', channelIds: draft.channelIds, mediaType: draft.mediaType,
     mediaItems: draft.mediaItems, caption: draft.caption, entities: draft.entities,
-    buttons: draft.buttons, options: draft.options, scheduledFor: dt.toUTC().toISO(),
-    autoDeleteAt: draft.options.autoDeleteMinutes ? dt.plus({ minutes: draft.options.autoDeleteMinutes }).toUTC().toISO() : null,
+    buttons: draft.buttons, options: draft.options, scheduledFor: dtUtc.toISO(),
+    autoDeleteAt: draft.options.autoDeleteMinutes ? dtUtc.plus({ minutes: draft.options.autoDeleteMinutes }).toISO() : null,
+    loopConfig: buildLoopConfig(draft), importedFrom: draft.importedFrom || null,
   });
-  await schedulePost(item.id, dt.toUTC().toISO());
+  await schedulePost(item.id, dtUtc.toISO());
   const names = await channelNames(draft.channelIds);
-  await ctx.reply(`⏰ Scheduled for ${dt.toFormat('yyyy-MM-dd HH:mm')} (${tz}) to ${names}.`, homeReplyKeyboard());
+  const local = dtUtc.setZone(tz);
+  await ctx.reply(`⏰ Scheduled for ${local.toFormat('EEE d MMM, HH:mm')} (${tz}) to ${names}.`, homeReplyKeyboard());
   ctx.session = {};
 }
 
 async function saveAsTemplate(ctx, name, { silent = false } = {}) {
   const draft = ctx.session.draft;
-  await savedItems.create({
+  const saved = await savedItems.create({
     kind: 'template', name, status: 'draft', mediaType: draft.mediaType, mediaItems: draft.mediaItems,
     caption: draft.caption, entities: draft.entities, buttons: draft.buttons, options: draft.options, channelIds: [],
   });
   if (silent) {
     await ctx.reply(`💾 Saved as template: "${name}" — now sending...`);
   } else {
-    await ctx.reply(`💾 Saved as template: "${name}"`, homeReplyKeyboard());
-    ctx.session = {};
+    await ctx.reply(`💾 Saved as template: "${name}"`);
+    ctx.session = { scene: 'templates' };
+    const { promptFolderChoice } = require('../../components/folderPicker');
+    await promptFolderChoice(ctx, saved.id);
   }
 }
 
@@ -428,7 +739,7 @@ async function registerHandlers(bot) {
   const requireDraft = async (ctx, next) => {
     if (!ctx.session?.draft) {
       await ctx.answerCbQuery('This step has expired', { show_alert: true });
-      try { await ctx.editMessageText('⏱ This New Post session has expired or already finished. Start a new one with 📝 New Post.'); } catch (_) {}
+      try { await ctx.editMessageText('⏱ This Compose session has expired or already finished. Start a new one with 🎨 Compose.'); } catch (_) {}
       return;
     }
     return next();
@@ -449,9 +760,7 @@ async function registerHandlers(bot) {
         ctx.session.step = 'awaiting_template_name_then_send';
         await showStep(ctx, `${header(5)}\n\nName this template (it'll be saved, then the post sends):`, Markup.inlineKeyboard([backCancelRow('cp:finish:backpreview')]));
       } else if (action === 'schedule') {
-        ctx.session.step = 'awaiting_schedule_time';
-        const tz = await settingsModel.get('timezone', 'UTC');
-        await showStep(ctx, `${header(5)}\n\nSend the date/time to send this (format: yyyy-MM-dd HH:mm), in ${tz}.`, Markup.inlineKeyboard([backCancelRow('cp:finish:backpreview')]));
+        await showScheduleStep(ctx);
       } else {
         await doSend(ctx, { undoWindow: true });
       }
@@ -487,6 +796,20 @@ async function registerHandlers(bot) {
     await showStep(ctx, `${header(1)}\n\nPick media from your library:`, Markup.inlineKeyboard(rows));
   });
 
+  bot.action('cp:import', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.session.step = 'awaiting_import';
+    await showStep(
+      ctx,
+      `${header(1)}\n\n📥 IMPORT EXISTING POST\n\n` +
+        'Forward the post here, or send a t.me link to a post in one of YOUR registered channels ' +
+        '(the bot can only read posts from channels it actually manages — not arbitrary outside channels).\n\n' +
+        'Formatting, media, and hyperlinks come across exactly as they are — this is why forwarding/linking is used ' +
+        'instead of copy-paste, which silently drops hyperlink formatting.',
+      Markup.inlineKeyboard([backCancelRow('cp:back:mediatype')])
+    );
+  });
+
   bot.action(/^cp:libpick:(\d+)$/, requireDraft, async (ctx) => {
     const id = parseInt(ctx.match[1], 10);
     await ctx.answerCbQuery();
@@ -516,6 +839,10 @@ async function registerHandlers(bot) {
       await goToPreview(ctx);
       return;
     }
+    if (action === 'help') {
+      await showStep(ctx, `${header(3)}\n\n${FORMAT_HELP_TEXT}`, formattingKeyboard());
+      return;
+    }
     if (action === 'striplinks') {
       const stripped = stripLinks(draft.caption, draft.entities);
       draft.caption = stripped.text;
@@ -523,22 +850,33 @@ async function registerHandlers(bot) {
       await showStep(ctx, `${header(3)}\n\n🚫 All links removed from the text.`, formattingKeyboard());
       return;
     }
+    if (action === 'replacelinks') {
+      ctx.session.step = 'awaiting_replace_links_url';
+      await showStep(ctx, `${header(3)}\n\n🔀 Send the one new link — every existing link in this post will be replaced with it (labels stay the same).`, Markup.inlineKeyboard([backCancelRow('cp:back:formatting')]));
+      return;
+    }
     if (action === 'link') {
       ctx.session.step = 'awaiting_link_text';
       await showStep(ctx, `${header(3)}\n\nSend the visible text for the link.`, Markup.inlineKeyboard([backCancelRow('cp:back:formatting')]));
       return;
     }
-    if (action === 'quote') {
-      draft.entities.push({ type: 'blockquote', offset: 0, length: draft.caption.length });
-      await showStep(ctx, `${header(3)}\n\n💬 Whole caption marked as a blockquote.`, formattingKeyboard());
-      return;
-    }
-    const typeMap = { bold: 'bold', italic: 'italic', underline: 'underline', strike: 'strikethrough', spoiler: 'spoiler', code: 'code' };
-    if (typeMap[action] && draft.caption) {
-      draft.entities.push({ type: typeMap[action], offset: 0, length: draft.caption.length });
-      await showStep(ctx, `${header(3)}\n\n✅ Applied ${action} to the full text.`, formattingKeyboard());
-    } else {
-      await showStep(ctx, `${header(3)}\n\nType your text first, then apply formatting.`, formattingKeyboard());
+    // v2.0.0 FIX: every style used to apply to the ENTIRE caption, no matter
+    // how long, with no way to format just a phrase - now prompts for which
+    // exact word/phrase to wrap (or ALL for the whole thing), and applies
+    // the entity to just that span.
+    const ENTITY_TYPES = ['bold', 'italic', 'underline', 'strikethrough', 'spoiler', 'code', 'blockquote', 'expandable_blockquote'];
+    if (ENTITY_TYPES.includes(action)) {
+      if (!draft.caption) {
+        await showStep(ctx, `${header(3)}\n\nType your text first, then apply formatting.`, formattingKeyboard());
+        return;
+      }
+      ctx.session.step = 'awaiting_format_target';
+      ctx.session.formatAction = action;
+      await showStep(
+        ctx,
+        `${header(3)}\n\nSend the exact word/phrase from your caption to make ${action.replace('_', ' ')} — or send ALL for the whole text.`,
+        Markup.inlineKeyboard([backCancelRow('cp:back:formatting')])
+      );
     }
   });
 
@@ -563,6 +901,54 @@ async function registerHandlers(bot) {
     await showStep(ctx, `${header(3)}\n\n🔘 Button added (${colorLabel(style)}).`, formattingKeyboard());
   });
 
+  bot.action('cp:opt:toggle:protect_content', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = ctx.session.draft;
+    draft.options.protect_content = !draft.options.protect_content;
+    await backToPreviewPanel(ctx);
+  });
+
+  bot.action('cp:loop:menu', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    const loop = ensureLoopDefaults(ctx.session.draft);
+    await showStep(ctx, loopMenuText(loop), loopMenuKeyboard(loop));
+  });
+
+  bot.action(/^cp:loop:(stay|gap):(\d+)$/, requireDraft, async (ctx) => {
+    const [, field, minutesStr] = ctx.match;
+    await ctx.answerCbQuery();
+    const loop = ensureLoopDefaults(ctx.session.draft);
+    loop[field === 'stay' ? 'stayMinutes' : 'gapMinutes'] = parseInt(minutesStr, 10);
+    await showStep(ctx, loopMenuText(loop), loopMenuKeyboard(loop));
+  });
+
+  bot.action(/^cp:loop:(stay|gap)custom$/, requireDraft, async (ctx) => {
+    const field = ctx.match[1];
+    await ctx.answerCbQuery();
+    ctx.session.step = `awaiting_loop_${field}_custom`;
+    await showStep(ctx, `${header(4)}\n\nType a duration, e.g. "45m", "2h", "1 day":`, Markup.inlineKeyboard([backCancelRow('cp:loop:menu')]));
+  });
+
+  bot.action('cp:loop:cycles:infinite', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    const loop = ensureLoopDefaults(ctx.session.draft);
+    loop.maxCycles = null;
+    await showStep(ctx, loopMenuText(loop), loopMenuKeyboard(loop));
+  });
+
+  bot.action('cp:loop:cycles:set', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.session.step = 'awaiting_loop_cycles';
+    await showStep(ctx, `${header(4)}\n\nHow many cycles? (a whole number, e.g. 5)`, Markup.inlineKeyboard([backCancelRow('cp:loop:menu')]));
+  });
+
+  bot.action('cp:loop:toggle', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    const loop = ensureLoopDefaults(ctx.session.draft);
+    loop.enabled = !loop.enabled;
+    await showStep(ctx, loopMenuText(loop), loopMenuKeyboard(loop));
+  });
+
   bot.action('cp:edit:caption', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     ctx.session.step = 'caption_for_media';
@@ -581,9 +967,38 @@ async function registerHandlers(bot) {
     await savedItems.create({
       kind: 'post', status: 'draft', channelIds: [], mediaType: draft.mediaType, mediaItems: draft.mediaItems,
       caption: draft.caption, entities: draft.entities, buttons: draft.buttons, options: draft.options,
+      loopConfig: buildLoopConfig(draft), importedFrom: draft.importedFrom || null,
     });
     await ctx.reply('📝 Saved as a draft (no channel, not sent) — find it later in 📜 History.', homeReplyKeyboard());
     ctx.session = {};
+  });
+
+  // v2.0.0: "no channel connected" recovery path - the draft is saved for
+  // real first (so it genuinely can never just disappear), THEN we hand off
+  // to Channels. True in-place resumption isn't safe to fake without a
+  // larger session-stack redesign, so this is the honest version: nothing
+  // lost, findable in History once the channel's added.
+  bot.action('cp:save:draft:then_channels', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = ctx.session.draft;
+    await savedItems.create({
+      kind: 'post', status: 'draft', channelIds: [], mediaType: draft.mediaType, mediaItems: draft.mediaItems,
+      caption: draft.caption, entities: draft.entities, buttons: draft.buttons, options: draft.options,
+      loopConfig: buildLoopConfig(draft), importedFrom: draft.importedFrom || null,
+    });
+    await ctx.reply('📝 Saved as a draft so nothing\'s lost — find it in 📜 History once your channel is added.\n\nNow let\'s add that channel:');
+    const channels = require('../channels');
+    await channels.enter(ctx);
+  });
+
+  bot.action(/^cp:schedpick:(\d+)$/, requireDraft, async (ctx) => {
+    const idx = parseInt(ctx.match[1], 10);
+    await ctx.answerCbQuery();
+    const preset = quickPickPresets()[idx];
+    if (!preset) return;
+    const tz = await settingsModel.get('timezone', 'UTC');
+    const dt = DateTime.now().setZone(tz).plus({ minutes: preset.minutes }).toUTC();
+    await finalizeSchedule(ctx, dt, tz);
   });
 
   bot.action(/^cp:finish:(send|schedule|send_template)$/, requireDraft, async (ctx) => {
@@ -591,7 +1006,18 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     const channels = await channelsModel.list();
     if (channels.length === 0) {
-      await ctx.reply('No channels registered yet. Go to 📡 Channels first to add one, then come back and finish this post.');
+      // v2.0.0 FIX: this used to be a plain text dead end ("go add a
+      // channel, then come back") with no way to recover the post in
+      // progress from right here. The draft is still sitting in the
+      // session untouched, so offer the two things that actually help.
+      await ctx.reply(
+        'No channels registered yet, so there\'s nowhere to send this to.',
+        Markup.inlineKeyboard([
+          [Markup.button.callback('📝 Save as Draft instead', 'cp:save:draft')],
+          [Markup.button.callback('➕ Add a Channel Now (auto-saves as draft first)', 'cp:save:draft:then_channels')],
+          backCancelRow('cp:finish:backpreview'),
+        ])
+      );
       return;
     }
     ctx.session.finishAction = action;

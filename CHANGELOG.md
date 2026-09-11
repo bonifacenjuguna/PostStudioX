@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.0.0 — the redesign
+
+Ground-up rebuild covering nearly every screen. Highlights:
+
+- **Renamed "New Post" → "Compose"** — same edited-in-place control-panel architecture (kept because it already worked), everything else rebuilt.
+- **Natural-language scheduling**: shows your current time in your own timezone, quick-pick buttons (10min/30min/1hr/3hr/tomorrow/week), and free-typed casual input ("friday 6pm", "in 2 hours") — no more typing exact UTC timestamps by hand. Reused in Edit Post's Reschedule too.
+- **Loop Mode**: a post can post → stay up → delete → wait a gap → repost, on repeat (infinite or a set number of cycles).
+- **Import via forward or link**: bring an existing post into Compose by forwarding it or pasting a t.me link (from a channel the bot manages) — formatting, media, and hyperlinks carry over exactly, since forwarding preserves Telegram's real entity data where copy-paste can't.
+- **Replace Links**: swap every link in a post for one new URL in a single action.
+- **Full formatting support**: added the previously-missing blockquote implementation, plus expandable_blockquote, custom_emoji, and text_mention. Format buttons now target a specific phrase instead of the whole caption.
+- **Channels**: native "pick a channel, rights preselected" add flow, a real Manage Channel hub (mute, remove, rights checklist, custom post signature, Sign Messages toggle).
+- **Templates**: merged with the old standalone Folders screen — folder-first browsing, inline folder creation, pick-or-create when saving.
+- **History**: 6-per-page, full per-post detail (timestamps, loop/import status), Repost Now, Save as Template, real Clear-one/Clear-all.
+- **Scheduled**: separate "Posting Soon" and "Auto-Deleting Soon" sections with live time-remaining, Post Now, Cancel, and outright Delete.
+- **Settings**: Defaults/Button Style/Auto-delete sections are no longer cosmetic — found and fixed a bug where Defaults was never actually read anywhere; About now shows live usage stats.
+- **Structured error reporting**: every failure now names the scene, the step, what was attempted, and why — logged to a new `action_errors` table — instead of a generic "something went wrong."
+- **Fixed a real bug**: stored button colors used `bg_primary`/`bg_danger`/`bg_success`, which don't match Bot API 9.4's actual `primary`/`success`/`danger` values — every colored button would have silently failed before this fix.
+- New `smoke-test.js` covering every pure-logic module plus a syntax check across all of `src/`.
+
 ## v1.2.2 — rebrand
 
 - Bot is now referred to as **PostStudioX** (@PostStudioXBot) throughout:

@@ -3,13 +3,15 @@
 // has no endpoint for this. Writes results into the same Postgres `stats`
 // table the main bot reads from - it never touches Telegraf/webhook logic.
 
-const { TelegramClient } = require('telegram');
+const { TelegramClient, Api } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const config = require('../config/env');
 const statsModel = require('../db/models/stats');
 const { safeRedis } = require('../queue/redisClient');
+const { drainCommands } = require('../queue/gramjsCommands');
 
 const POLL_INTERVAL_MS = 15 * 60 * 1000; // 15 min - deliberately not aggressive, per spec caveat
+const COMMAND_INTERVAL_MS = 10 * 1000; // owner-triggered actions should feel responsive, unlike view polling
 
 process.on('unhandledRejection', (reason) => {
   console.error('[gramjs-monitor] Unhandled promise rejection:', reason);
@@ -69,6 +71,31 @@ async function pollViews(client) {
   await safeRedis.set('gramjs:last_poll_at', Date.now().toString());
 }
 
+// Handles cross-process commands from the main bot that need the MTProto
+// user session (things the Bot API simply has no endpoint for). Currently
+// just Sign Messages, but built as a switch so more can land here later
+// without another cross-process plumbing job.
+async function processCommands(client) {
+  const commands = await drainCommands().catch((err) => {
+    console.warn('[gramjs-monitor] Failed draining command queue:', err.message);
+    return [];
+  });
+
+  for (const cmd of commands) {
+    try {
+      if (cmd.type === 'toggle_signatures') {
+        const channel = await client.getEntity(cmd.chat_id);
+        await client.invoke(new Api.channels.ToggleSignatures({ channel, enabled: !!cmd.enabled }));
+        console.log(`[gramjs-monitor] Set sign_messages=${cmd.enabled} on ${cmd.chat_id}`);
+      } else {
+        console.warn(`[gramjs-monitor] Unknown command type: ${cmd.type}`);
+      }
+    } catch (err) {
+      console.error(`[gramjs-monitor] Command "${cmd.type}" failed for ${cmd.chat_id}:`, err.message);
+    }
+  }
+}
+
 async function start() {
   console.log('[gramjs-monitor] Starting views monitor service...');
   const client = await buildClient();
@@ -81,6 +108,7 @@ async function start() {
 
   await pollViews(client);
   setInterval(() => pollViews(client).catch((err) => console.error('[gramjs-monitor] Poll cycle error:', err.message)), POLL_INTERVAL_MS);
+  setInterval(() => processCommands(client).catch((err) => console.error('[gramjs-monitor] Command cycle error:', err.message)), COMMAND_INTERVAL_MS);
 }
 
 start().catch((err) => {

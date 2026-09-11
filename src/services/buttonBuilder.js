@@ -1,14 +1,19 @@
 // Builds Telegram inline_keyboard markup from our stored button JSON shape:
 //   [[{text, url, style}]]                 - link button
-//   [[{text, note, style}]]                - v1.1.0: "note" button, no URL -
-//                                             tapping it shows `note` as a
-//                                             popup instead of opening a link
-// `style` maps to Bot API 9.4's button background colors (bg_primary /
-// bg_danger / bg_success). Telegraf's typed Markup.button helpers may not
-// yet pass through `style`, so we build the raw reply_markup object
-// directly to guarantee it reaches the API regardless of library version.
+//   [[{text, note, style}]]                - "note" button, no URL - tapping
+//                                             it shows `note` as a popup
+//                                             instead of opening a link
+//
+// `style` maps to Bot API 9.4's button color field. The actual accepted
+// values are 'primary' (blue), 'success' (green), 'danger' (red) - no
+// prefix. (Earlier version of this file used bg_primary/bg_danger/
+// bg_success, which don't match the real API and would have been silently
+// dropped/rejected by Telegram - fixed here.) Telegraf's typed
+// Markup.button helpers may not yet pass through `style` since it's a very
+// recent addition, so the raw reply_markup object is built directly to
+// guarantee it reaches the API regardless of library version.
 
-const VALID_STYLES = ['bg_primary', 'bg_danger', 'bg_success'];
+const VALID_STYLES = ['primary', 'success', 'danger'];
 const NOTE_PREFIX = 'note:';
 const MAX_CALLBACK_DATA_BYTES = 64;
 
@@ -54,9 +59,9 @@ function truncateToBytes(str, maxBytes) {
 
 function colorLabel(style) {
   switch (style) {
-    case 'bg_primary': return '🔵 Primary';
-    case 'bg_danger': return '🔴 Danger';
-    case 'bg_success': return '🟢 Success';
+    case 'primary': return '🔵 Primary';
+    case 'danger': return '🔴 Danger';
+    case 'success': return '🟢 Success';
     default: return '⚪ Default';
   }
 }

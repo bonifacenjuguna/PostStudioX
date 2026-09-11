@@ -10,7 +10,7 @@ const config = require('../config/env');
 const savedItems = require('../db/models/savedItems');
 const channelsModel = require('../db/models/channels');
 const { publishSavedItem } = require('../services/publisher');
-const { scheduleAutoDelete } = require('./queues');
+const { scheduleAutoDelete, schedulePost } = require('./queues');
 const watchdogLog = require('../db/models/watchdogLog');
 const { isEffectivelyAdmin, describeIssue } = require('../services/channelPermissions');
 
@@ -65,9 +65,23 @@ const scheduledPostWorker = new Worker(
     }
 
     const results = await publishSavedItem(bot.telegram, item);
+    const refs = results.flatMap((r) => r.messages.map((m) => ({ chat_id: r.chatId, message_id: m.message_id })));
 
-    if (item.auto_delete_at) {
-      const refs = results.flatMap((r) => r.messages.map((m) => ({ chat_id: r.chatId, message_id: m.message_id })));
+    // Loop mode's delete timing is dynamic (stay_seconds from now), so it
+    // takes priority over the fixed auto_delete_at column - a looping post
+    // defines its own rhythm rather than a one-off delete time.
+    if (item.loop_config?.enabled) {
+      const deleteAt = new Date(Date.now() + item.loop_config.stay_seconds * 1000).toISOString();
+      // Cycle-suffixed jobId: BullMQ keeps completed job history around
+      // (removeOnComplete keeps the last 100, see queues.js), so reusing
+      // the plain autodelete:<id> jobId on every loop cycle would collide
+      // with the still-remembered previous cycle's completed job and throw.
+      // NOTE for the Scheduled-screen "cancel" UI (not yet built): a
+      // looping item's active job id is autodelete:<id>:c<cycles_done>, not
+      // the plain autodelete:<id> - cancelAutoDelete() below only knows the
+      // plain form, so cancelling a loop mid-flight needs the cycle number.
+      await scheduleAutoDelete(savedItemId, deleteAt, refs, `autodelete:${savedItemId}:c${item.loop_config.cycles_done || 0}`);
+    } else if (item.auto_delete_at) {
       await scheduleAutoDelete(savedItemId, item.auto_delete_at, refs);
     }
   },
@@ -86,6 +100,37 @@ const autoDeleteWorker = new Worker(
         console.warn(`[worker] Auto-delete failed for ${ref.chat_id}/${ref.message_id}: ${err.message}`);
       }
     }
+
+    // Loop mode: post -> stay up -> delete (just happened above) -> wait
+    // the gap -> repost, repeating per the cycle limit (or forever). Rather
+    // than a brand new mechanism, this reuses the exact same
+    // scheduled-posts queue/worker as a normal scheduled send - the item
+    // just flips back to 'scheduled' with a future send time equal to the
+    // gap, and scheduledPostWorker above picks it up exactly like any other
+    // scheduled post would, loop_config included.
+    const item = await savedItems.findById(savedItemId);
+    const loop = item?.loop_config;
+    if (loop?.enabled && loop.active) {
+      const cyclesDone = (loop.cycles_done || 0) + 1;
+      const exhausted = loop.max_cycles != null && cyclesDone >= loop.max_cycles;
+      if (exhausted) {
+        await savedItems.updateWithVersion(savedItemId, {
+          status: 'deleted',
+          loop_config: { ...loop, cycles_done: cyclesDone, active: false },
+        }).catch(() => {});
+      } else {
+        const nextSendAt = new Date(Date.now() + loop.gap_seconds * 1000).toISOString();
+        await savedItems.updateWithVersion(savedItemId, {
+          status: 'scheduled',
+          scheduled_for: nextSendAt,
+          loop_config: { ...loop, cycles_done: cyclesDone },
+        }).catch(() => {});
+        // Same cycle-suffixed jobId reasoning as the auto-delete side above.
+        await schedulePost(savedItemId, nextSendAt, `post:${savedItemId}:c${cyclesDone}`);
+      }
+      return;
+    }
+
     await savedItems.updateWithVersion(savedItemId, { status: 'deleted' }).catch(() => {});
   },
   { connection, concurrency: 2 }

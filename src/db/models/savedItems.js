@@ -1,6 +1,6 @@
 const db = require('../pool');
 
-const JSONB_COLUMNS = new Set(['media_items', 'entities', 'buttons', 'options']);
+const JSONB_COLUMNS = new Set(['media_items', 'entities', 'buttons', 'options', 'loop_config', 'imported_from']);
 const ARRAY_COLUMNS = new Set(['channel_ids']);
 
 // v1.1.0 (#12): shared by create() and updateWithVersion() so every caller
@@ -17,7 +17,7 @@ function serializeColumn(col, raw) {
 
 async function create(fields) {
   const cols = ['kind', 'name', 'status', 'channel_ids', 'media_type', 'media_items',
-    'caption', 'entities', 'buttons', 'options', 'scheduled_for', 'auto_delete_at'];
+    'caption', 'entities', 'buttons', 'options', 'scheduled_for', 'auto_delete_at', 'loop_config', 'imported_from'];
   const values = cols.map((c) => {
     const camelKey = c.replace(/_([a-z])/g, (_, l) => l.toUpperCase());
     const raw = fields[camelKey] !== undefined ? fields[camelKey] : defaultFor(c);
@@ -79,6 +79,27 @@ async function listScheduled({ limit = 8, offset = 0 } = {}) {
     [limit, offset]
   );
   return res.rows;
+}
+
+// Posts already sent, with a delete pending (either the plain auto_delete_at
+// column, or an active loop's next delete) - shown separately in Scheduled
+// per the "show what's going to post vs. what's going to get deleted"
+// requirement, since these are two different fates the owner wants visibility on.
+async function listPendingAutoDelete({ limit = 8, offset = 0 } = {}) {
+  const res = await db.query(
+    `SELECT * FROM saved_items
+     WHERE status = 'sent' AND auto_delete_at IS NOT NULL AND auto_delete_at > now()
+     ORDER BY auto_delete_at ASC LIMIT $1 OFFSET $2`,
+    [limit, offset]
+  );
+  return res.rows;
+}
+
+async function countPendingAutoDelete() {
+  const res = await db.query(
+    `SELECT COUNT(*)::int AS count FROM saved_items WHERE status = 'sent' AND auto_delete_at IS NOT NULL AND auto_delete_at > now()`
+  );
+  return res.rows[0].count;
 }
 
 // Every mutation to a saved_item bumps version and snapshots the *previous*
@@ -179,6 +200,19 @@ async function hardDelete(id) {
   await db.query('DELETE FROM saved_items WHERE id = $1', [id]);
 }
 
+// Bulk version of hardDelete for History's "Clear All" - scoped to kind
+// 'post' always (Templates/folders manage their own lifecycle separately),
+// optionally further scoped to one status filter to match "clear all
+// Trashed" vs a blanket "clear everything".
+async function hardDeleteAllPosts(statusFilter = null) {
+  if (statusFilter) {
+    const res = await db.query("DELETE FROM saved_items WHERE kind = 'post' AND status = $1", [statusFilter]);
+    return res.rowCount;
+  }
+  const res = await db.query("DELETE FROM saved_items WHERE kind = 'post'");
+  return res.rowCount;
+}
+
 async function pruneOldVersions(keep = 10) {
   // Keeps the most recent `keep` versions per saved_item, deletes the rest.
   const res = await db.query(`
@@ -195,7 +229,7 @@ async function pruneOldVersions(keep = 10) {
 }
 
 module.exports = {
-  create, findById, listByKind, countByKind, listScheduled,
+  create, findById, listByKind, countByKind, listScheduled, listPendingAutoDelete, countPendingAutoDelete,
   updateWithVersion, listVersions, rollbackToVersion,
-  trash, restoreFromTrash, purgeOldTrash, hardDelete, pruneOldVersions,
+  trash, restoreFromTrash, purgeOldTrash, hardDelete, hardDeleteAllPosts, pruneOldVersions,
 };

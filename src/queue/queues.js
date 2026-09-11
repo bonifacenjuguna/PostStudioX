@@ -33,9 +33,9 @@ async function cancelScheduledPost(savedItemId) {
   if (job) await job.remove();
 }
 
-async function scheduleAutoDelete(savedItemId, deleteAt, messageRefs) {
+async function scheduleAutoDelete(savedItemId, deleteAt, messageRefs, jobIdOverride) {
   const delay = Math.max(0, new Date(deleteAt).getTime() - Date.now());
-  const jobId = `autodelete:${savedItemId}`;
+  const jobId = jobIdOverride || `autodelete:${savedItemId}`;
   return autoDeleteQueue.add('delete', { savedItemId, messageRefs }, { jobId, delay });
 }
 
