@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.1.0 — Replace/Edit a live post (the feature I'd missed)
+
+- **New: Replace-Live** — forward an already-sent channel post to the bot, or paste its t.me link, with no menu navigation needed (works ambiently, any time you're not mid-flow). The bot resolves it, checks admin rights, then offers **✏️ Edit In Place** (routes into the existing Edit Post screen) or **🔄 Replace Entirely** (deletes the old message, then hands off to Compose to build its replacement from scratch — for when the new content is a different type than the old, e.g. text → video).
+- This was previously only half-built: Import (bring a post in as a *new* draft) existed, but directly editing/replacing an *already-live* post via link/forward — what was actually asked for — did not. Built now, reusing Compose's Import logic (factored into shared `telegramLinks.js`/`messageAdapter.js` modules) rather than duplicating it.
+- A post reached this way that wasn't already tracked gets adopted into the normal saved_items system, so Edit Post/History work with it exactly like any other post from here on.
+
 ## v2.0.3 — rights preselection, done the robust way
 
 - **Added `setMyDefaultAdministratorRights` sync** on bot startup (idempotent, safe to run every boot) — this is Telegram's own dedicated method for "suggest these rights whenever this bot is added as admin," and it applies automatically everywhere (the plain channel picker, a manual add via Telegram's own UI) without needing a fragile per-button rights object that has to track an ever-growing schema by hand. Gets back the "rights preselected" feel from the original ask, without the risk that broke it twice.

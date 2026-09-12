@@ -213,6 +213,24 @@ try {
   failed += 1;
 }
 
+// ── 6. telegramLinks — shared t.me link parsing ─────────────────────────
+console.log('\n[6] telegramLinks');
+const { parseTmeLink } = require('./src/services/telegramLinks');
+
+check('parses a public-channel t.me link into {username, messageId}', () => {
+  const r = parseTmeLink('https://t.me/somechannel/123');
+  assertEqual(r, { username: 'somechannel', messageId: 123 });
+});
+
+check('parses a private t.me/c/ link into {chatId, messageId}', () => {
+  const r = parseTmeLink('t.me/c/1234567890/45');
+  assertEqual(r, { chatId: '-1001234567890', messageId: 45 });
+});
+
+check('returns null for text that is not a t.me link', () => {
+  assertEqual(parseTmeLink('hello world'), null);
+});
+
 // ── Summary ────────────────────────────────────────────────────────────
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed > 0 ? 1 : 0);

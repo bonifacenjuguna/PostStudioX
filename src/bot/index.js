@@ -14,6 +14,7 @@ const { registerWatchdogAlertHandlers } = require('./handlers/watchdogAlertHandl
 const { registerReactionHandlers } = require('./handlers/reactionHandlers');
 const { registerMainMenu } = require('./handlers/mainMenu');
 const { registerSceneRouter } = require('./sceneRouter');
+const { registerHandlers: registerReplaceLive } = require('./handlers/replaceLive');
 const { registerPaginationJump } = require('./components/pagination');
 
 const channels = require('./scenes/channels');
@@ -66,6 +67,10 @@ function buildBot() {
 
   registerMainMenu(bot, scenes);
   registerSceneRouter(bot, scenes);
+  // Registered right after the scene router, which already calls next()
+  // for idle-session text/media - this only ever fires on genuinely idle
+  // messages (a forward or t.me link with no active flow), by design.
+  registerReplaceLive(bot);
 
   channels.registerHandlers(bot);
   createPost.registerHandlers(bot);

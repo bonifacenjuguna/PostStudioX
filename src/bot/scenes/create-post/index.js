@@ -196,29 +196,8 @@ async function askForContent(ctx) {
 // forward/link rather than copy-paste: the Message object carries the real
 // entities array (hyperlinks, blockquotes, everything), which manual
 // copy-paste of visible text cannot reproduce.
-function extractDraftFieldsFromMessage(msg) {
-  const fields = { entities: msg.caption_entities || msg.entities || [] };
-  if (msg.photo) {
-    fields.mediaType = 'photo';
-    fields.mediaItems = [{ file_id: msg.photo[msg.photo.length - 1].file_id, type: 'photo' }];
-    fields.caption = msg.caption || '';
-  } else if (msg.video) {
-    fields.mediaType = 'video';
-    fields.mediaItems = [{ file_id: msg.video.file_id, type: 'video' }];
-    fields.caption = msg.caption || '';
-  } else if (msg.document) {
-    fields.mediaType = 'document';
-    fields.mediaItems = [{ file_id: msg.document.file_id, type: 'document' }];
-    fields.caption = msg.caption || '';
-  } else {
-    fields.mediaType = 'text';
-    fields.mediaItems = [];
-    fields.caption = msg.text || '';
-  }
-  return fields;
-}
-
-const TME_LINK_PATTERN = /^(?:https?:\/\/)?t\.me\/(c\/(\d+)|([A-Za-z0-9_]+))\/(\d+)/i;
+const { extractDraftFieldsFromMessage } = require('../../../services/messageAdapter');
+const { parseTmeLink } = require('../../../services/telegramLinks');
 
 async function handleImportInput(ctx) {
   const draft = ctx.session.draft;
@@ -242,17 +221,17 @@ async function handleImportInput(ctx) {
   // Case 2: a t.me link to a post in one of our own registered channels.
   const text = ctx.message.text?.trim();
   if (!text) return false;
-  const match = text.match(TME_LINK_PATTERN);
-  if (!match) return false;
+  const parsed = parseTmeLink(text);
+  if (!parsed) return false;
 
-  const messageId = parseInt(match[4], 10);
+  const messageId = parsed.messageId;
   let sourceChatId;
-  if (match[2]) {
-    sourceChatId = `-100${match[2]}`; // t.me/c/<internal_id>/<msg_id> form
+  if (parsed.chatId) {
+    sourceChatId = parsed.chatId; // t.me/c/<internal_id>/<msg_id> form
   } else {
-    const channel = await channelsModel.list().then((list) => list.find((c) => c.username?.toLowerCase() === match[3].toLowerCase()));
+    const channel = await channelsModel.list().then((list) => list.find((c) => c.username?.toLowerCase() === parsed.username.toLowerCase()));
     if (!channel) {
-      await ctx.reply(`🔴 "${match[3]}" isn't one of your registered channels, so I can't read that post — only channels the bot manages can be imported from.`);
+      await ctx.reply(`🔴 "${parsed.username}" isn't one of your registered channels, so I can't read that post — only channels the bot manages can be imported from.`);
       return true;
     }
     sourceChatId = channel.chat_id;

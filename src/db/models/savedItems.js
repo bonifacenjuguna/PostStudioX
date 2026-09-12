@@ -102,6 +102,25 @@ async function countPendingAutoDelete() {
   return res.rows[0].count;
 }
 
+// Finds the saved_item (if any) that already tracks a given live channel
+// message - used by the Replace-Live feature to check whether a post
+// someone links/forwards is already one we manage, before creating a new
+// tracking record for it. current_message_refs is a JSONB array of
+// {chat_id, message_id}; matched as text to avoid string/number type
+// mismatches between however each was originally stored.
+async function findByMessageRef(chatId, messageId) {
+  const res = await db.query(
+    `SELECT * FROM saved_items
+     WHERE EXISTS (
+       SELECT 1 FROM jsonb_array_elements(current_message_refs) ref
+       WHERE (ref->>'chat_id') = $1 AND (ref->>'message_id')::bigint = $2
+     )
+     LIMIT 1`,
+    [String(chatId), messageId]
+  );
+  return res.rows[0] || null;
+}
+
 // Every mutation to a saved_item bumps version and snapshots the *previous*
 // state into post_versions, so rollback always has something to roll back to.
 async function updateWithVersion(id, patch) {
@@ -229,7 +248,7 @@ async function pruneOldVersions(keep = 10) {
 }
 
 module.exports = {
-  create, findById, listByKind, countByKind, listScheduled, listPendingAutoDelete, countPendingAutoDelete,
+  create, findById, listByKind, countByKind, listScheduled, listPendingAutoDelete, countPendingAutoDelete, findByMessageRef,
   updateWithVersion, listVersions, rollbackToVersion,
   trash, restoreFromTrash, purgeOldTrash, hardDelete, hardDeleteAllPosts, pruneOldVersions,
 };
