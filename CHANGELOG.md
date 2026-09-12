@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.0.2 — Add Channel actually works now
+
+- **USER_RIGHTS_MISSING on Add Channel, for real this time**: the v2.0.1 fix (adding missing required `ChatAdministratorRights` fields) didn't resolve it on retest. Rather than keep guessing at that field's exact expected shape with no live Telegram connection to verify against, `bot_administrator_rights` has been dropped entirely from the request_chat button. Trade-off: the channel picker no longer shows this bot's needed permissions pre-checked (the "Add Bot to a Channel" feel from the original ask) - but the button itself is now the plain, extremely well-established form that just works. Rights are still checked and shown right after a channel is picked, same as before - that part never depended on the risky field.
+
 ## v2.0.1 — first testing-round fixes
 
 Real bugs found by actually testing v2.0.0, fixed:

@@ -7,7 +7,6 @@ const {
   formatPermissions,
   snapshotRights,
   grantedVsMissing,
-  buildBotAdministratorRights,
 } = require('../../../services/channelPermissions');
 const { queueToggleSignMessages } = require('../../../queue/gramjsCommands');
 const { logAction } = require('../../../services/actionErrors');
@@ -25,9 +24,19 @@ function listKeyboard(channels) {
 
 // Reply keyboard used only while "waiting to register a channel" - the
 // request_chat button opens Telegram's native chat picker, filtered to
-// channels the owner administers, with this bot's exact admin-rights ask
-// preselected (bot_administrator_rights) so confirming feels like the
-// familiar "Add Bot to a Channel" flow instead of a blank permissions form.
+// channels the owner administers.
+//
+// v2.0.2 FIX: this used to also set `bot_administrator_rights` to preselect
+// this bot's needed permissions in the picker (the "Add Bot to a Channel"
+// feel from the original request). That field kept causing
+// USER_RIGHTS_MISSING even after correcting it to include every required
+// ChatAdministratorRights field - and without a live Telegram connection to
+// test against, guessing at its exact expected shape a third time isn't a
+// responsible use of your time. Dropped entirely in favor of the plain,
+// extremely well-established form of this button (no rights payload) that
+// works everywhere. Rights are still checked and shown immediately after
+// the channel is picked (registerChannelFromChatId, below) - that part
+// never depended on this field.
 function addChannelReplyKeyboard() {
   return Markup.keyboard([
     [{
@@ -36,7 +45,6 @@ function addChannelReplyKeyboard() {
         request_id: CHAT_REQUEST_ID,
         chat_is_channel: true,
         bot_is_member: false,
-        bot_administrator_rights: buildBotAdministratorRights(),
         request_title: true,
         request_username: true,
       },
@@ -200,7 +208,7 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     await ctx.reply(
       '➕ Add a channel any of these ways:\n\n' +
-        '• Tap "➕ Pick a Channel" below - your admin rights for this bot are already preselected, just confirm\n' +
+        '• Tap "➕ Pick a Channel" below - Telegram will ask you to add the bot as admin there\n' +
         '• Forward any message from the channel\n' +
         '• Send its @username, a t.me/ link, or its numeric chat ID\n\n' +
         'Either way, the bot needs to already be an admin there with "Post Messages" rights.',

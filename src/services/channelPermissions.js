@@ -92,6 +92,12 @@ function grantedVsMissing(rightsSnapshot) {
 // switched on when the owner is asked to confirm - this is what makes the
 // picker feel like "Add Bot to a Channel" instead of a blank permissions
 // form. Anything not listed defaults to off.
+// Currently unused (see v2.0.2 note in channels/index.js's
+// addChannelReplyKeyboard - dropped from the request_chat button after
+// repeated USER_RIGHTS_MISSING errors that couldn't be resolved without a
+// live Telegram connection to test against). Left here, tested, and
+// documented rather than deleted, in case a future pass with real API
+// access confirms the correct shape and it's worth re-wiring.
 function buildBotAdministratorRights() {
   const rights = {
     is_anonymous: false,
