@@ -102,6 +102,25 @@ check('stripLinks removes text_link/text_mention entities and bare URLs from tex
   assert(!stripped.text.includes('http'), 'bare URL text should be gone');
 });
 
+check('REGRESSION: multiple format types in one message do not corrupt each other\'s offsets (v2.0.1 bug)', () => {
+  // The exact bug class found during testing: an earlier-registered format
+  // (bold) appearing in the text AFTER a later-registered format (italic)
+  // used to have its offset silently corrupted by italic's marker removal.
+  const { text, entities } = formatter.parseShorthand('__italic__ and **bold** and `code` and ~~strike~~');
+  assertEqual(text, 'italic and bold and code and strike');
+  for (const e of entities) {
+    const actual = text.slice(e.offset, e.offset + e.length);
+    const expected = { italic: 'italic', bold: 'bold', code: 'code', strikethrough: 'strike' }[e.type];
+    assertEqual(actual, expected, `entity ${e.type} offset should point at its own text, not shifted`);
+  }
+});
+
+check('a blockquote appearing after other formats still gets correct offsets', () => {
+  const { text, entities } = formatter.parseShorthand('**bold** then >>a quote<< then __italic__');
+  const quote = entities.find((e) => e.type === 'blockquote');
+  assertEqual(text.slice(quote.offset, quote.offset + quote.length), 'a quote');
+});
+
 // ── 3. channelPermissions ───────────────────────────────────────────────
 console.log('\n[3] channelPermissions');
 const perms = require('./src/services/channelPermissions');

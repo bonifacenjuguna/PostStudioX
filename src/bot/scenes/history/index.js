@@ -102,6 +102,8 @@ function detailKeyboard(item) {
 async function showDetail(ctx, id) {
   const item = await savedItems.findById(id);
   if (!item) return ctx.reply('Not found — it may have already been cleared.');
+  const { sendPreview, draftShapeFromSavedItem } = require('../../components/previewRenderer');
+  await sendPreview(ctx, draftShapeFromSavedItem(item)).catch(() => {});
   await ctx.reply(detailText(item), detailKeyboard(item));
 }
 

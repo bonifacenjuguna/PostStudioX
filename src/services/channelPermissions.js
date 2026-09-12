@@ -93,7 +93,18 @@ function grantedVsMissing(rightsSnapshot) {
 // picker feel like "Add Bot to a Channel" instead of a blank permissions
 // form. Anything not listed defaults to off.
 function buildBotAdministratorRights() {
-  const rights = { is_anonymous: false };
+  const rights = {
+    is_anonymous: false,
+    // ChatAdministratorRights has several REQUIRED boolean fields beyond the
+    // ones this bot actually cares about (RELEVANT_PERMISSIONS below only
+    // lists the ones worth showing/preselecting to the owner) - omitting
+    // required fields entirely (as an earlier version of this function did)
+    // makes Telegram reject the whole request_chat button with
+    // USER_RIGHTS_MISSING, not just decline the missing ones. Explicitly
+    // false here since this bot doesn't need them.
+    can_manage_video_chats: false,
+    can_restrict_members: false,
+  };
   for (const { key, preselect } of RELEVANT_PERMISSIONS) {
     rights[key] = !!preselect;
   }

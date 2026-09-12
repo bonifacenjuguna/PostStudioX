@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.0.1 — first testing-round fixes
+
+Real bugs found by actually testing v2.0.0, fixed:
+
+- **USER_RIGHTS_MISSING on Add Channel**: `ChatAdministratorRights` has required boolean fields (`can_manage_video_chats`, `can_restrict_members`) that were omitted entirely — Telegram rejected the whole request, not just those two rights. Now included explicitly.
+- **Native Telegram formatting was silently discarded**: if you used the app's own bold/italic/blockquote toolbar instead of typing this bot's shorthand markers, the formatting never made it into the post — only literal shorthand was ever read. Now real entities on an incoming message are used directly when present.
+- **Architectural bug in the formatter**: sequential per-style passes could corrupt each other's entity offsets whenever a message combined more than one format type — this is very likely what caused "some formatting doesn't work" reports (code blocks included). Rewritten as a proper single-pass parser; added a regression test for exactly this case.
+- **Caption attached directly to a photo/video/document was being ignored**, and the bot re-asked for it — now read straight off the incoming message when present.
+- **No way to turn off the automatic link-preview card** — added a Link Preview toggle in Compose, applied consistently in the live Preview, the real send, and the worker.
+- **More live previews**: opening an item in Edit Post, History, or Templates now shows the actual rendered post (real formatting/media), not just a text summary.
+
 ## v2.0.0 — the redesign
 
 Ground-up rebuild covering nearly every screen. Highlights:

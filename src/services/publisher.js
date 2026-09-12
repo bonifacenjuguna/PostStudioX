@@ -45,6 +45,11 @@ async function publishSavedItem(telegram, item) {
     protect_content: !!options.protect_content,
     reply_markup: buildInlineKeyboard(item.buttons),
     has_spoiler: !!options.has_spoiler,
+    // v2.0.1: exposed as a toggle after testing turned up an unwanted large
+    // link-preview card with no way to turn it off - only matters for
+    // plain-text posts (sendMessage below); media captions don't generate
+    // their own separate preview card.
+    link_preview_options: options.disable_link_preview ? { is_disabled: true } : undefined,
   };
 
   const results = [];
@@ -77,7 +82,8 @@ async function publishSavedItem(telegram, item) {
     } else {
       // text
       sent = [await withApiTimeout(telegram.sendMessage(chatId, item.caption || '', {
-        entities: extra.entities, ...pick(extra, ['disable_notification', 'protect_content', 'reply_markup']),
+        entities: extra.entities, link_preview_options: extra.link_preview_options,
+        ...pick(extra, ['disable_notification', 'protect_content', 'reply_markup']),
       }), 'sendMessage')];
     }
 

@@ -45,7 +45,26 @@ async function sendPreview(ctx, draft) {
     });
   }
   // text
-  return ctx.reply(draft.caption || '(empty message)', { entities: opts.entities, reply_markup: keyboard });
+  return ctx.reply(draft.caption || '(empty message)', {
+    entities: opts.entities,
+    reply_markup: keyboard,
+    link_preview_options: draft.options?.disable_link_preview ? { is_disabled: true } : undefined,
+  });
 }
 
-module.exports = { sendPreview };
+// Adapts a saved_items DB row (snake_case columns) into the shape
+// sendPreview expects (camelCase, draft-like) - shared so every screen that
+// wants to show a live preview of an existing item (Edit Post, History,
+// Templates) does it the same way instead of each rolling its own mapping.
+function draftShapeFromSavedItem(item) {
+  return {
+    mediaType: item.media_type,
+    mediaItems: item.media_items || [],
+    caption: item.caption || '',
+    entities: item.entities || [],
+    buttons: item.buttons || [],
+    options: item.options || {},
+  };
+}
+
+module.exports = { sendPreview, draftShapeFromSavedItem };

@@ -283,6 +283,24 @@ async function handleImportInput(ctx) {
   return true;
 }
 
+// v2.0.0 BUG FIX: if the owner applies formatting using Telegram's own
+// native toolbar (bold/italic/blockquote buttons in the app) instead of
+// typing this bot's **shorthand** markers, the message arrives with REAL
+// entities already attached (ctx.message.entities/caption_entities) - the
+// plain .text field never contains the formatting, only the visible
+// characters. Previously this was never checked, so native formatting was
+// silently discarded and only literally-typed shorthand markers worked.
+// Native entities (when present) are trusted as-is instead of re-parsing
+// plain text for shorthand, since they're already the exact real thing.
+function extractFormattedContent(message) {
+  const nativeEntities = message.entities || message.caption_entities;
+  const rawText = message.text ?? message.caption ?? '';
+  if (nativeEntities && nativeEntities.length > 0) {
+    return { text: rawText, entities: nativeEntities };
+  }
+  return parseShorthand(rawText);
+}
+
 async function handleText(ctx) {
   const step = ctx.session.step;
   const draft = ctx.session.draft;
@@ -308,7 +326,7 @@ async function handleText(ctx) {
       return;
     }
     if (draft.mediaType === 'text') {
-      const { text: parsedText, entities } = parseShorthand(text);
+      const { text: parsedText, entities } = extractFormattedContent(ctx.message);
       draft.caption = parsedText;
       draft.entities = entities;
       applyStripLinksDefault(draft);
@@ -337,7 +355,7 @@ async function handleText(ctx) {
   }
 
   if (step === 'caption_for_media') {
-    const { text: parsedText, entities } = parseShorthand(text === '/skip' ? '' : text);
+    const { text: parsedText, entities } = text === '/skip' ? { text: '', entities: [] } : extractFormattedContent(ctx.message);
     draft.caption = parsedText;
     draft.entities = entities;
     applyStripLinksDefault(draft);
@@ -465,6 +483,27 @@ async function handleText(ctx) {
   }
 }
 
+// v2.0.0 BUG FIX: photo/video/document previously always asked for a
+// caption as a SEPARATE follow-up message, even when the owner had already
+// attached one to the same message they sent (the normal way most people
+// post - attach media, type caption, hit send once). That attached caption
+// was silently discarded and the bot asked for it again. Now it's read
+// straight off the incoming message when present, entities included.
+async function captureAttachedCaptionOrPrompt(ctx) {
+  const draft = ctx.session.draft;
+  if (ctx.message.caption) {
+    const { text: parsedText, entities } = extractFormattedContent(ctx.message);
+    draft.caption = parsedText;
+    draft.entities = entities;
+    applyStripLinksDefault(draft);
+    ctx.session.step = 'formatting';
+    await showStep(ctx, `${header(3)}\n\nCaption carried over. Add more formatting, links, or buttons — or tap Done.`, formattingKeyboard());
+    return;
+  }
+  ctx.session.step = 'caption_for_media';
+  await showStep(ctx, `${header(3)}\n\nAdd a caption (or send /skip):`, Markup.inlineKeyboard([backCancelRow('cp:back:content')]));
+}
+
 async function handleMedia(ctx) {
   const step = ctx.session.step;
   const draft = ctx.session.draft;
@@ -480,16 +519,13 @@ async function handleMedia(ctx) {
   if (draft.mediaType === 'photo' && ctx.message.photo) {
     const largest = ctx.message.photo[ctx.message.photo.length - 1];
     draft.mediaItems = [{ file_id: largest.file_id, type: 'photo' }];
-    ctx.session.step = 'caption_for_media';
-    await showStep(ctx, `${header(3)}\n\nAdd a caption (or send /skip):`, Markup.inlineKeyboard([backCancelRow('cp:back:content')]));
+    await captureAttachedCaptionOrPrompt(ctx);
   } else if (draft.mediaType === 'video' && ctx.message.video) {
     draft.mediaItems = [{ file_id: ctx.message.video.file_id, type: 'video' }];
-    ctx.session.step = 'caption_for_media';
-    await showStep(ctx, `${header(3)}\n\nAdd a caption (or send /skip):`, Markup.inlineKeyboard([backCancelRow('cp:back:content')]));
+    await captureAttachedCaptionOrPrompt(ctx);
   } else if (draft.mediaType === 'document' && ctx.message.document) {
     draft.mediaItems = [{ file_id: ctx.message.document.file_id, type: 'document' }];
-    ctx.session.step = 'caption_for_media';
-    await showStep(ctx, `${header(3)}\n\nAdd a caption (or send /skip):`, Markup.inlineKeyboard([backCancelRow('cp:back:content')]));
+    await captureAttachedCaptionOrPrompt(ctx);
   } else if (draft.mediaType === 'media_group' && (ctx.message.photo || ctx.message.video)) {
     const item = ctx.message.photo
       ? { file_id: ctx.message.photo[ctx.message.photo.length - 1].file_id, type: 'photo' }
@@ -573,6 +609,9 @@ async function buildPreviewPanel(draft) {
     rows.push([Markup.button.callback('▫️▫️ OPTIONS ▫️▫️', 'nav:noop')]);
     rows.push([
       Markup.button.callback(`${draft.options.protect_content ? '🔒' : '🔓'} Protect Content: ${draft.options.protect_content ? 'On' : 'Off'}`, 'cp:opt:toggle:protect_content'),
+    ]);
+    rows.push([
+      Markup.button.callback(`${draft.options.disable_link_preview ? '🚫🔗' : '🔗'} Link Preview: ${draft.options.disable_link_preview ? 'Off' : 'On'}`, 'cp:opt:toggle:disable_link_preview'),
     ]);
     rows.push([
       Markup.button.callback(`🔁 Loop Mode: ${draft.options.loop?.enabled ? 'On' : 'Off'}`, 'cp:loop:menu'),
@@ -901,10 +940,11 @@ async function registerHandlers(bot) {
     await showStep(ctx, `${header(3)}\n\n🔘 Button added (${colorLabel(style)}).`, formattingKeyboard());
   });
 
-  bot.action('cp:opt:toggle:protect_content', requireDraft, async (ctx) => {
+  bot.action(/^cp:opt:toggle:(.+)$/, requireDraft, async (ctx) => {
+    const key = ctx.match[1];
     await ctx.answerCbQuery();
     const draft = ctx.session.draft;
-    draft.options.protect_content = !draft.options.protect_content;
+    draft.options[key] = !draft.options[key];
     await backToPreviewPanel(ctx);
   });
 

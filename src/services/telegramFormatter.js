@@ -4,7 +4,21 @@
 // later edits (link replacement, link stripping, import-and-edit) a simple
 // entity-array operation instead of re-parsing text.
 //
-// Shorthand supported (v2 — full Telegram entity coverage):
+// v2.0.1 BUG FIX: the previous version ran each format type as its own
+// sequential pass over a progressively-shrinking text (bold pass, then
+// italic pass, then...), recording each entity's offset at the moment it
+// was found. That's unsound: a LATER pass stripping marker characters
+// BEFORE an EARLIER pass's already-recorded entity silently invalidates
+// that entity's offset, since the text shifts left underneath it. Any
+// message combining more than one format type - unless the first-processed
+// style happened to also be first in the text - ended up with corrupted,
+// misaligned entities. Rewritten as a single pass: every pattern is matched
+// against the ORIGINAL, unmodified text first, all matches are sorted by
+// position, overlaps resolved, and the final text + entity offsets are
+// built in exactly one left-to-right walk - so no entity's position is ever
+// computed against a text state that later changes underneath it.
+//
+// Shorthand supported:
 //   **bold**                       -> bold
 //   __italic__                     -> italic
 //   ~~strike~~                     -> strikethrough
@@ -22,26 +36,40 @@
 // on purpose — Telegram recognizes them client-side): @mentions, #hashtags,
 // $cashtags, /bot_commands, raw http(s) URLs, emails, phone numbers.
 
-const EXPANDABLE_BLOCKQUOTE_PATTERN = /(?<!>)>>>(?!>)([\s\S]+?)(?<!<)<<<(?!<)/g;
-const BLOCKQUOTE_PATTERN = /(?<!>)>>(?!>)([\s\S]+?)(?<!<)<<(?!<)/g;
-const CUSTOM_EMOJI_PATTERN = /\{emoji:(\d+)\}(.+?)\{\/emoji\}/g;
-
-// Order matters: expandable_blockquote and custom_emoji must run before the
-// generic PATTERNS loop so their markers don't get mistaken for anything
-// else, and blockquote must run after expandable_blockquote so `>>>...<<<`
-// isn't half-consumed by the shorter `>>...<<` regex first.
-const PATTERNS = [
-  { regex: /\*\*(.+?)\*\*/g, type: 'bold' },
-  { regex: /__(.+?)__/g, type: 'italic' },
-  { regex: /~~(.+?)~~/g, type: 'strikethrough' },
-  { regex: /\+\+(.+?)\+\+/g, type: 'underline' },
-  { regex: /\|\|(.+?)\|\|/g, type: 'spoiler' },
-  { regex: /```([\s\S]+?)```/g, type: 'pre' },
-  { regex: /`(.+?)`/g, type: 'code' },
-];
-
-const LINK_PATTERN = /\[(.+?)\]\((tg:\/\/user\?id=\d+|https?:\/\/[^\s)]+)\)/g;
 const TG_USER_ID_PATTERN = /^tg:\/\/user\?id=(\d+)$/;
+
+// Registration order doubles as overlap-resolution priority: if two
+// matches start at the exact same position (a genuine ambiguity, not the
+// sequential-shrinkage bug above), the one registered first wins.
+const MATCHERS = [
+  {
+    regex: /\{emoji:(\d+)\}(.+?)\{\/emoji\}/g,
+    build: (m) => ({ type: 'custom_emoji', custom_emoji_id: m[1], replacement: m[2] }),
+  },
+  {
+    regex: /\[(.+?)\]\((tg:\/\/user\?id=\d+|https?:\/\/[^\s)]+)\)/g,
+    build: (m) => {
+      const userIdMatch = m[2].match(TG_USER_ID_PATTERN);
+      if (userIdMatch) return { type: 'text_mention', user: { id: Number(userIdMatch[1]) }, replacement: m[1] };
+      return { type: 'text_link', url: m[2], replacement: m[1] };
+    },
+  },
+  {
+    regex: /(?<!>)>>>(?!>)([\s\S]+?)(?<!<)<<<(?!<)/g,
+    build: (m) => ({ type: 'expandable_blockquote', replacement: m[1] }),
+  },
+  {
+    regex: /(?<!>)>>(?!>)([\s\S]+?)(?<!<)<<(?!<)/g,
+    build: (m) => ({ type: 'blockquote', replacement: m[1] }),
+  },
+  { regex: /\*\*(.+?)\*\*/g, build: (m) => ({ type: 'bold', replacement: m[1] }) },
+  { regex: /__(.+?)__/g, build: (m) => ({ type: 'italic', replacement: m[1] }) },
+  { regex: /~~(.+?)~~/g, build: (m) => ({ type: 'strikethrough', replacement: m[1] }) },
+  { regex: /\+\+(.+?)\+\+/g, build: (m) => ({ type: 'underline', replacement: m[1] }) },
+  { regex: /\|\|(.+?)\|\|/g, build: (m) => ({ type: 'spoiler', replacement: m[1] }) },
+  { regex: /```([\s\S]+?)```/g, build: (m) => ({ type: 'pre', replacement: m[1] }) },
+  { regex: /`(.+?)`/g, build: (m) => ({ type: 'code', replacement: m[1] }) },
+];
 
 // Rough URL matcher for raw (non-markdown) links typed directly in text —
 // used by stripLinks/replaceAllLinks to catch links that weren't wrapped
@@ -49,78 +77,56 @@ const TG_USER_ID_PATTERN = /^tg:\/\/user\?id=(\d+)$/;
 const RAW_URL_PATTERN = /(https?:\/\/[^\s]+)/g;
 
 function parseShorthand(rawText) {
-  let text = rawText;
-  const entities = [];
+  const allMatches = [];
 
-  // Custom emoji first: its braces don't collide with anything else, but
-  // running it early keeps the fallback glyph's offset stable before any
-  // other replacement shifts things around.
-  text = replaceAndTrack(text, CUSTOM_EMOJI_PATTERN, entities, (match) => ({
-    type: 'custom_emoji',
-    custom_emoji_id: match[1],
-    replacement: match[2],
-  }));
-
-  // Links (and text-mentions, a link whose "url" is a tg://user?id=... deep
-  // link) next, since their replacement text length differs from the source.
-  text = replaceAndTrack(text, LINK_PATTERN, entities, (match) => {
-    const userIdMatch = match[2].match(TG_USER_ID_PATTERN);
-    if (userIdMatch) {
-      return {
-        type: 'text_mention',
-        user: { id: Number(userIdMatch[1]) },
-        replacement: match[1],
-      };
+  for (const matcher of MATCHERS) {
+    const re = new RegExp(matcher.regex.source, matcher.regex.flags.includes('g') ? matcher.regex.flags : matcher.regex.flags + 'g');
+    let match;
+    while ((match = re.exec(rawText)) !== null) {
+      const built = matcher.build(match);
+      allMatches.push({ start: match.index, end: match.index + match[0].length, built });
+      if (match[0].length === 0) re.lastIndex += 1;
     }
-    return { type: 'text_link', url: match[2], replacement: match[1] };
-  });
-
-  // Expandable blockquote before plain blockquote (see ordering note above).
-  text = replaceAndTrack(text, EXPANDABLE_BLOCKQUOTE_PATTERN, entities, (match) => ({
-    type: 'expandable_blockquote',
-    replacement: match[1],
-  }));
-  text = replaceAndTrack(text, BLOCKQUOTE_PATTERN, entities, (match) => ({
-    type: 'blockquote',
-    replacement: match[1],
-  }));
-
-  for (const { regex, type } of PATTERNS) {
-    text = replaceAndTrack(text, regex, entities, (match) => ({
-      type,
-      replacement: match[1],
-    }));
   }
 
-  return { text, entities: sortEntities(entities) };
-}
+  // Sort by start position; for a genuine tie, registration order (already
+  // the array's insertion order going into allMatches) decides via a
+  // stable sort, which every modern JS engine's Array.prototype.sort is.
+  allMatches.sort((a, b) => a.start - b.start || a.end - b.end);
 
-function replaceAndTrack(text, regex, entities, buildEntity) {
+  // Resolve overlaps: once a match is accepted, any later (in sort order)
+  // match that starts before the accepted match's end is a genuine overlap
+  // and is dropped rather than corrupting the single pass below.
+  const resolved = [];
+  let lastEnd = -1;
+  for (const m of allMatches) {
+    if (m.start < lastEnd) continue;
+    resolved.push(m);
+    lastEnd = m.end;
+  }
+
+  // Single left-to-right pass: every offset is computed against `result`,
+  // which only ever grows by exactly what's been walked so far - nothing
+  // computed here is ever invalidated by a later step, because there is no
+  // later step that touches earlier text.
   let result = '';
-  let lastIndex = 0;
-  let match;
-  const re = new RegExp(regex.source, regex.flags.includes('g') ? regex.flags : regex.flags + 'g');
-
-  while ((match = re.exec(text)) !== null) {
-    const built = buildEntity(match);
-    const { type, url, user, custom_emoji_id: customEmojiId, replacement } = built;
-    result += text.slice(lastIndex, match.index);
+  let cursor = 0;
+  const entities = [];
+  for (const m of resolved) {
+    result += rawText.slice(cursor, m.start);
     const offset = utf16LengthAsCodeUnits(result);
-    result += replacement;
-    const length = utf16LengthAsCodeUnits(replacement);
-
-    const entity = { type, offset, length };
-    if (url) entity.url = url;
-    if (user) entity.user = user;
-    if (customEmojiId) entity.custom_emoji_id = customEmojiId;
+    result += m.built.replacement;
+    const length = utf16LengthAsCodeUnits(m.built.replacement);
+    const entity = { type: m.built.type, offset, length };
+    if (m.built.url) entity.url = m.built.url;
+    if (m.built.user) entity.user = m.built.user;
+    if (m.built.custom_emoji_id) entity.custom_emoji_id = m.built.custom_emoji_id;
     entities.push(entity);
-
-    lastIndex = match.index + match[0].length;
-    // Guard against a zero-length match looping forever.
-    if (match[0].length === 0) re.lastIndex += 1;
+    cursor = m.end;
   }
-  result += text.slice(lastIndex);
-  return result;
+  result += rawText.slice(cursor);
+
+  return { text: result, entities };
 }
 
 // Telegram counts entity offsets in UTF-16 code units. JS string .length
@@ -129,10 +135,6 @@ function replaceAndTrack(text, regex, entities, buildEntity) {
 // and isn't accidentally "fixed" into codepoint counting later.
 function utf16LengthAsCodeUnits(str) {
   return str.length;
-}
-
-function sortEntities(entities) {
-  return entities.slice().sort((a, b) => a.offset - b.offset);
 }
 
 // Removes all text_link/text_mention entities and any raw http(s) URLs
@@ -170,18 +172,13 @@ function replaceLinkUrl(entities, targetText, fullText, newUrl) {
 // comes after a rewritten bare URL has its offset shifted to match.
 function replaceAllLinks(text, entities, newUrl) {
   const workingEntities = (entities || []).map((e) => ({ ...e }));
-  let resultText = '';
-  let cursor = 0;
+  let resultText = text;
   let linksFound = false;
 
-  // Sort raw-URL matches by position so we process left to right and can
-  // shift later entity offsets by a running delta.
   const rawMatches = [];
   let m;
   const re = new RegExp(RAW_URL_PATTERN.source, 'g');
   while ((m = re.exec(text)) !== null) {
-    // Skip a raw URL that's actually the hidden target of a text_link
-    // entity's visible text (rare, but avoids double-touching it).
     const alreadyEntityUrl = workingEntities.some(
       (e) => (e.type === 'text_link') && text.slice(e.offset, e.offset + e.length) === m[0]
     );
@@ -192,7 +189,6 @@ function replaceAllLinks(text, entities, newUrl) {
   for (const match of rawMatches) {
     const start = match.index + delta;
     const end = start + match.length;
-    resultText = resultText || text;
     resultText = resultText.slice(0, start) + newUrl + resultText.slice(end);
     const lengthDiff = newUrl.length - match.length;
     for (const e of workingEntities) {
@@ -201,7 +197,6 @@ function replaceAllLinks(text, entities, newUrl) {
     delta += lengthDiff;
     linksFound = true;
   }
-  resultText = resultText || text;
 
   const finalEntities = workingEntities.map((e) => {
     if (e.type === 'text_link') {

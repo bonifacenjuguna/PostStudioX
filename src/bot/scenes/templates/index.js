@@ -69,8 +69,10 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     const t = await savedItems.findById(id);
     if (!t) return ctx.reply('Template not found.');
+    const { sendPreview, draftShapeFromSavedItem } = require('../../components/previewRenderer');
+    await sendPreview(ctx, draftShapeFromSavedItem(t)).catch(() => {});
     await ctx.reply(
-      `📄 ${t.name}\n\n${t.caption || '(no caption)'}`,
+      `📄 ${t.name}`,
       Markup.inlineKeyboard([
         [Markup.button.callback('▶️ Use', `tpl:use:${id}`)],
         [Markup.button.callback('✏️ Edit', `tpl:edit:${id}`), Markup.button.callback('🗑 Delete', `tpl:delete:${id}`)],

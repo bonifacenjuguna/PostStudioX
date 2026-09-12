@@ -39,6 +39,12 @@ async function openEditMenu(ctx, itemId, { returnTo } = {}) {
   const item = await savedItems.findById(itemId);
   if (!item) return ctx.reply('That post no longer exists.');
   ctx.session = { scene: 'edit-post', editingId: itemId, editReturnTo: returnTo };
+  // v2.0.1 (#preview coverage): previously this only showed a 60-char text
+  // summary - now shows the actual rendered post (real formatting/media),
+  // the same renderer used by Compose's own Preview step, so editing
+  // starts from seeing what's actually there instead of guessing from text.
+  const { sendPreview, draftShapeFromSavedItem } = require('../../components/previewRenderer');
+  await sendPreview(ctx, draftShapeFromSavedItem(item)).catch(() => {});
   await ctx.reply(
     `Editing: ${item.name || item.caption?.slice(0, 60) || '(untitled)'}\nStatus: ${item.status} · v${item.version}`,
     editMenuKeyboard(item, returnTo)
