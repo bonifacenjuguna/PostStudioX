@@ -208,7 +208,7 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     await ctx.reply(
       '➕ Add a channel any of these ways:\n\n' +
-        '• Tap "➕ Pick a Channel" below - Telegram will ask you to add the bot as admin there\n' +
+        '• Tap "➕ Pick a Channel" below - Telegram will suggest this bot\'s needed admin rights automatically, just confirm\n' +
         '• Forward any message from the channel\n' +
         '• Send its @username, a t.me/ link, or its numeric chat ID\n\n' +
         'Either way, the bot needs to already be an admin there with "Post Messages" rights.',

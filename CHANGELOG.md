@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.0.3 — rights preselection, done the robust way
+
+- **Added `setMyDefaultAdministratorRights` sync** on bot startup (idempotent, safe to run every boot) — this is Telegram's own dedicated method for "suggest these rights whenever this bot is added as admin," and it applies automatically everywhere (the plain channel picker, a manual add via Telegram's own UI) without needing a fragile per-button rights object that has to track an ever-growing schema by hand. Gets back the "rights preselected" feel from the original ask, without the risk that broke it twice.
+- **Added newly-researched admin rights to the tracked permission set**: `can_post_stories`/`can_edit_stories`/`can_delete_stories`, `can_manage_topics`, `can_manage_tags`, `can_send_welcome_messages` — not preselected by default (no feature uses them yet), but now visible in Manage Channels' granted/missing checklist and available for future features to build on.
+
 ## v2.0.2 — Add Channel actually works now
 
 - **USER_RIGHTS_MISSING on Add Channel, for real this time**: the v2.0.1 fix (adding missing required `ChatAdministratorRights` fields) didn't resolve it on retest. Rather than keep guessing at that field's exact expected shape with no live Telegram connection to verify against, `bot_administrator_rights` has been dropped entirely from the request_chat button. Trade-off: the channel picker no longer shows this bot's needed permissions pre-checked (the "Add Bot to a Channel" feel from the original ask) - but the button itself is now the plain, extremely well-established form that just works. Rights are still checked and shown right after a channel is picked, same as before - that part never depended on the risky field.

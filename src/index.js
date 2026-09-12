@@ -53,6 +53,17 @@ async function main() {
     { command: 'status', description: 'View bot system status' },
   ]);
 
+  // v2.0.3: registers this bot's default admin rights with Telegram once
+  // per startup (idempotent - safe to repeat every boot) so channels'
+  // request_chat picker and any manual "add as admin" flow both suggest the
+  // same rights automatically. Non-blocking: a failure here (e.g. an older
+  // Bot API server not yet supporting one of the newer right fields) must
+  // never stop the bot from starting.
+  const { syncDefaultAdministratorRights } = require('./services/channelPermissions');
+  syncDefaultAdministratorRights(bot.telegram)
+    .then(() => console.log('[startup] Default administrator rights synced.'))
+    .catch((err) => console.warn('[startup] Failed to sync default administrator rights (non-fatal):', err.message));
+
   const app = express();
   app.use(express.json());
 

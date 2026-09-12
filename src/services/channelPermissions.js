@@ -13,8 +13,14 @@ const RELEVANT_PERMISSIONS = [
   { key: 'can_delete_messages', label: '🗑 Delete messages', preselect: true },
   { key: 'can_pin_messages', label: '📌 Pin messages', preselect: true },
   { key: 'can_invite_users', label: '🔗 Invite users (for loop/repost links)', preselect: true },
+  { key: 'can_post_stories', label: '📖 Post Stories', preselect: false },
+  { key: 'can_edit_stories', label: '📖 Edit Stories', preselect: false },
+  { key: 'can_delete_stories', label: '📖 Delete Stories', preselect: false },
+  { key: 'can_send_welcome_messages', label: '👋 Send welcome messages', preselect: false },
   { key: 'can_change_info', label: 'ℹ️ Change channel info', preselect: false },
   { key: 'can_manage_chat', label: '🛠 Manage chat', preselect: false },
+  { key: 'can_manage_topics', label: '🗂 Manage topics', preselect: false },
+  { key: 'can_manage_tags', label: '🏷 Manage tags', preselect: false },
   { key: 'can_promote_members', label: '⬆️ Add new admins', preselect: false },
 ];
 
@@ -92,22 +98,18 @@ function grantedVsMissing(rightsSnapshot) {
 // switched on when the owner is asked to confirm - this is what makes the
 // picker feel like "Add Bot to a Channel" instead of a blank permissions
 // form. Anything not listed defaults to off.
-// Currently unused (see v2.0.2 note in channels/index.js's
-// addChannelReplyKeyboard - dropped from the request_chat button after
-// repeated USER_RIGHTS_MISSING errors that couldn't be resolved without a
-// live Telegram connection to test against). Left here, tested, and
-// documented rather than deleted, in case a future pass with real API
-// access confirms the correct shape and it's worth re-wiring.
+// Currently unused for the request_chat button (see v2.0.2 note in
+// channels/index.js) - now used to build the payload for
+// setMyDefaultAdministratorRights instead, which is the more robust way to
+// get "rights preselected" behavior: set once, Telegram suggests these
+// rights automatically every time this bot is added as admin ANYWHERE
+// (the plain picker, a manual add via Telegram's own UI, all of it) -
+// rather than needing a fragile inline object on every individual button
+// that has to be kept in sync with an ever-growing ChatAdministratorRights
+// schema by hand.
 function buildBotAdministratorRights() {
   const rights = {
     is_anonymous: false,
-    // ChatAdministratorRights has several REQUIRED boolean fields beyond the
-    // ones this bot actually cares about (RELEVANT_PERMISSIONS below only
-    // lists the ones worth showing/preselecting to the owner) - omitting
-    // required fields entirely (as an earlier version of this function did)
-    // makes Telegram reject the whole request_chat button with
-    // USER_RIGHTS_MISSING, not just decline the missing ones. Explicitly
-    // false here since this bot doesn't need them.
     can_manage_video_chats: false,
     can_restrict_members: false,
   };
@@ -117,6 +119,18 @@ function buildBotAdministratorRights() {
   return rights;
 }
 
+// Calls setMyDefaultAdministratorRights once so Telegram suggests this
+// bot's needed rights by default whenever it's added as a channel admin,
+// anywhere. Safe to call on every bot startup - idempotent, just
+// re-registers the same rights - so it self-corrects if RELEVANT_PERMISSIONS
+// above ever changes, without needing a migration step.
+async function syncDefaultAdministratorRights(telegram) {
+  await telegram.setMyDefaultAdministratorRights({
+    rights: buildBotAdministratorRights(),
+    for_channels: true,
+  });
+}
+
 module.exports = {
   isEffectivelyAdmin,
   describeIssue,
@@ -124,5 +138,6 @@ module.exports = {
   snapshotRights,
   grantedVsMissing,
   buildBotAdministratorRights,
+  syncDefaultAdministratorRights,
   RELEVANT_PERMISSIONS,
 };

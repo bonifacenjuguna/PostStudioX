@@ -138,6 +138,14 @@ check('buildBotAdministratorRights preselects only the rights this bot actually 
   assert(rights.can_promote_members === false);
 });
 
+check('buildBotAdministratorRights includes the newer Story/topic/tag/welcome rights (tracked, not preselected)', () => {
+  const rights = perms.buildBotAdministratorRights();
+  for (const key of ['can_post_stories', 'can_edit_stories', 'can_delete_stories', 'can_manage_topics', 'can_manage_tags', 'can_send_welcome_messages']) {
+    assert(key in rights, `expected ${key} to be present`);
+    assert(rights[key] === false, `expected ${key} to default to false`);
+  }
+});
+
 check('grantedVsMissing splits a rights snapshot correctly', () => {
   const { granted, missing } = perms.grantedVsMissing({ can_post_messages: true, can_pin_messages: false });
   assert(granted.some((l) => l.includes('Post messages')));
