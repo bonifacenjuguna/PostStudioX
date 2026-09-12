@@ -15,7 +15,7 @@ async function startCommand(ctx) {
     await ctx.reply(
       '🎬 Welcome to PostStudioX.\n\n' +
         "I post, schedule, format, and clean up after myself in your Telegram channels — you tell me what and when, I handle the rest.\n\n" +
-        "First thing: I'll need admin rights in a channel before I can do anything there. Tap 📡 Channels to add one — it takes one tap to confirm, the permissions I ask for are already picked for you.\n\n" +
+        "First thing: I'll need admin rights in a channel before I can do anything there. Tap ⚙️ Settings → 📡 Channels to add one — it takes one tap to confirm, the permissions I ask for are already picked for you.\n\n" +
         'Everything else runs on buttons. /help, /status, and this /start are the only typed commands.',
       homeReplyKeyboard()
     );

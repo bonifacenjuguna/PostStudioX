@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.1.1 — Edit/Replace gets its own home
+
+- **Main menu reorganized**: 📡 Channels moved into ⚙️ Settings (channel management is a one-time-ish config task, not a daily action) — same Channels scene, just reached through Settings → 📡 Channels now.
+- **✏️ Edit/Replace is now a real main-menu button**, not just an ambient forward/link trigger. Tapping it shows clear instructions, then the same forward-or-link flow from v2.1.0 takes over — Edit In Place or Replace Entirely, same as before, just genuinely discoverable now instead of hidden.
+- Updated every place that told people to tap 📡 Channels directly (help text, the first-time welcome message, Edit Post's clone-target error) to point at the new location.
+
 ## v2.1.0 — Replace/Edit a live post (the feature I'd missed)
 
 - **New: Replace-Live** — forward an already-sent channel post to the bot, or paste its t.me link, with no menu navigation needed (works ambiently, any time you're not mid-flow). The bot resolves it, checks admin rights, then offers **✏️ Edit In Place** (routes into the existing Edit Post screen) or **🔄 Replace Entirely** (deletes the old message, then hands off to Compose to build its replacement from scratch — for when the new content is a different type than the old, e.g. text → video).

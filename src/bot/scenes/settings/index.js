@@ -15,6 +15,7 @@ const { subScreenReplyKeyboard, backHomeRow } = require('../../components/navRow
 // whether it was already on or off.
 function menuKeyboard() {
   return Markup.inlineKeyboard([
+    [Markup.button.callback('📡 Channels', 'set:channels')],
     [Markup.button.callback('🎛 Defaults', 'set:defaults')],
     [Markup.button.callback('🕐 Timezone', 'set:timezone')],
     [Markup.button.callback('🔔 Notifications', 'set:notifications')],
@@ -118,6 +119,16 @@ async function registerHandlers(bot) {
   bot.action('set:list', async (ctx) => {
     await ctx.answerCbQuery();
     try { await ctx.editMessageText('⚙️ Settings & System Status', menuKeyboard()); } catch (_) { await enter(ctx); }
+  });
+
+  // v2.1.1: 📡 Channels moved here from the main reply keyboard to make
+  // room for the Edit/Replace feature - still the exact same Channels
+  // scene underneath, just reached through Settings now.
+  bot.action('set:channels', async (ctx) => {
+    await ctx.answerCbQuery();
+    const channels = require('../channels');
+    ctx.session = { scene: 'channels' };
+    await channels.enter(ctx);
   });
 
   bot.action('set:defaults', async (ctx) => {

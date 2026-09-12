@@ -243,7 +243,7 @@ async function registerHandlers(bot) {
     const id = parseInt(ctx.match[1], 10);
     const channels = await channelsModel.list();
     if (channels.length === 0) {
-      await ctx.reply('No registered channels to clone to yet — add one from 📡 Channels first.');
+      await ctx.reply('No registered channels to clone to yet — add one from ⚙️ Settings → 📡 Channels first.');
       return;
     }
     const rows = channels.map((c) => [Markup.button.callback(`${c.is_admin ? '🟢' : '🔴'} ${c.title || c.chat_id}`, `ep:clonepick:${id}:${c.chat_id}`)]);

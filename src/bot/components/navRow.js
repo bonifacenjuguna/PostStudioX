@@ -37,8 +37,13 @@ function withEmergencyStop(rows) {
 
 // Home reply keyboard - the persistent bottom bar shown outside any wizard.
 function homeReplyKeyboard() {
+  // v2.1.1: 📡 Channels moved into ⚙️ Settings (channel management is a
+  // config-adjacent task, not a daily action) - freeing this slot for the
+  // Replace-Live feature (edit or fully replace an already-sent post),
+  // which was previously only reachable ambiently (forward/link with no
+  // active flow) and had no discoverable entry point.
   return Markup.keyboard([
-    ['🎨 Compose', '📡 Channels', '🗂 Templates'],
+    ['🎨 Compose', '✏️ Edit/Replace', '🗂 Templates'],
     ['⏰ Scheduled', '📜 History', '⚙️ Settings'],
   ]).resize();
 }

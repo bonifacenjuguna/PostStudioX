@@ -43,7 +43,7 @@ const TOPICS = {
   channels: {
     title: '📡 Channels & permissions',
     body:
-      'Register a channel under 📡 Channels → ➕ Add Channel, any of: tap "Choose a Channel" to pick it natively, forward a message from it, send its @username, a t.me/ link, or its numeric chat ID. ' +
+      'Register a channel under ⚙️ Settings → 📡 Channels → ➕ Add Channel, any of: tap "➕ Pick a Channel" to pick it natively, forward a message from it, send its @username, a t.me/ link, or its numeric chat ID. ' +
       'The bot needs to already be an admin there with "Post Messages" rights.\n\n' +
       '🔄 Re-check Rights shows exactly which permissions the bot has or is missing (post, edit, delete, pin, invite, etc.), not just a yes/no. ' +
       'If it ever loses rights, you\'ll get an alert — unless you\'ve muted that specific channel with 🔕 Mute Alerts.',

@@ -1,3 +1,4 @@
+const { Markup } = require('telegraf');
 const { subScreenReplyKeyboard } = require('../components/navRow');
 
 function registerMainMenu(bot, scenes) {
@@ -6,9 +7,14 @@ function registerMainMenu(bot, scenes) {
     await scenes.createPost.enter(ctx);
   });
 
-  bot.hears('📡 Channels', async (ctx) => {
-    ctx.session = { scene: 'channels' };
-    await scenes.channels.enter(ctx);
+  bot.hears('✏️ Edit/Replace', async (ctx) => {
+    ctx.session = {};
+    await ctx.reply(
+      '✏️ EDIT/REPLACE A LIVE POST\n\n' +
+        'Forward the post here, or send its t.me link (only works for channels this bot manages).\n\n' +
+        'You\'ll get the choice to edit it in place, or replace it entirely with a brand-new post.',
+      Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'nav:cancel')]])
+    );
   });
 
   bot.hears('🗂 Templates', async (ctx) => {
