@@ -70,20 +70,10 @@ function buildWorkers(telegram, connection) {
       // defines its own rhythm rather than a one-off delete time.
       if (item.loop_config?.enabled) {
         const deleteAt = new Date(Date.now() + item.loop_config.stay_seconds * 1000).toISOString();
-        // Cycle-suffixed jobId: BullMQ keeps completed job history around
-        // (removeOnComplete keeps the last 100, see queues.js), so reusing
-        // the plain autodelete-<id> jobId on every loop cycle would collide
-        // with the still-remembered previous cycle's completed job and throw.
-        // BUGFIX: this used to be `autodelete:${id}:c${cycle}` - a ':' in a
-        // custom job id makes BullMQ throw "Custom Id cannot contain :"
-        // immediately (colons are reserved for its own Redis key
-        // namespacing), which is what surfaced as the grace_period_send
-        // error right after a post actually went out successfully. '-' is
-        // a safe delimiter.
-        // NOTE for the Scheduled-screen "cancel" UI: a looping item's active
-        // job id is autodelete-<id>-c<cycles_done>, not the plain
-        // autodelete-<id> - cancelAutoDelete() only knows the plain form, so
-        // cancelling a loop mid-flight needs the cycle number.
+        // v2.2.1: hyphen-based, matching the fix in queues.js - the old
+        // colon-based cycle-suffixed form (autodelete:<id>:c<n>) happened
+        // to be valid under BullMQ's odd "colon count must be exactly 2"
+        // rule, but consistency matters more than relying on that quirk.
         await scheduleAutoDelete(savedItemId, deleteAt, refs, `autodelete-${savedItemId}-c${item.loop_config.cycles_done || 0}`);
       } else if (item.auto_delete_at) {
         await scheduleAutoDelete(savedItemId, item.auto_delete_at, refs);
@@ -129,8 +119,12 @@ function buildWorkers(telegram, connection) {
             scheduled_for: nextSendAt,
             loop_config: { ...loop, cycles_done: cyclesDone },
           }).catch(() => {});
-          // Same cycle-suffixed jobId reasoning (and '-' delimiter bugfix)
-          // as the auto-delete side above.
+          // Same hyphen-based cycle-suffixed jobId reasoning as above -
+          // still needed so re-scheduling the next cycle doesn't collide
+          // with this cycle's completed job in BullMQ's history
+          // (removeOnComplete keeps the last 100, see queues.js). NOTE for
+          // the Scheduled-screen "cancel" UI: a looping item's active job
+          // id is post-<id>-c<cycles_done>, not the plain post-<id>.
           await schedulePost(savedItemId, nextSendAt, `post-${savedItemId}-c${cyclesDone}`);
         }
         return;
