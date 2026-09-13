@@ -63,12 +63,21 @@ async function offerActions(ctx) {
     await ctx.reply(`🔴 Can't edit or replace that: ${describeIssue(member) || 'the bot isn\'t an admin there'}.`);
     return true;
   }
+  // can_edit_messages is only required to edit a message some OTHER admin
+  // posted - a bot can always edit its own posts without it, and channel
+  // posts don't reliably expose authorship info to this API to tell those
+  // cases apart up front. So this can't safely gate the flow (that would
+  // break it for people whose bot only edits its own posts), but it's
+  // worth a heads-up: if this specific post turns out not to be one the
+  // bot originally sent, this is the most likely reason an edit attempt
+  // would fail.
+  const missingEditRight = member.status !== 'creator' && member.can_edit_messages !== true;
 
   const item = await ensureTrackedItem(target.chatId, target.messageId, target.message);
   ctx.session = { scene: 'replace-live', pendingItemId: item.id, pendingChatId: target.chatId, pendingMessageId: target.messageId };
 
   await ctx.reply(
-    `📍 Found this post in ${target.chatId}.\n\nWhat do you want to do with it?`,
+    `📍 Found this post in ${target.chatId}.${missingEditRight ? '\n\n⚠️ Heads up: the bot is admin here without "Edit Messages" rights — if this post wasn\'t originally sent by this bot, an edit attempt will fail with a permissions error.' : ''}\n\nWhat do you want to do with it?`,
     Markup.inlineKeyboard([
       [Markup.button.callback('✏️ Edit In Place', `rl:edit:${item.id}`)],
       [Markup.button.callback('🔄 Replace Entirely', `rl:replace:${item.id}`)],
