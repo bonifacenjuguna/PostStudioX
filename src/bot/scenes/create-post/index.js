@@ -617,11 +617,22 @@ async function buildPreviewPanel(draft) {
     rows.push([
       Markup.button.callback(`🔁 Loop Mode: ${draft.options.loop?.enabled ? 'On' : 'Off'}`, 'cp:loop:menu'),
     ]);
-    rows.push([Markup.button.callback('▫️▫️ SAVE ▫️▫️', 'nav:noop')]);
-    rows.push([Markup.button.callback('💾 Save as Template', 'cp:save:template'), Markup.button.callback('📝 Save as Draft', 'cp:save:draft')]);
-    rows.push([Markup.button.callback('▫️▫️ SEND ▫️▫️', 'nav:noop')]);
-    rows.push([Markup.button.callback('⏰ Schedule', 'cp:finish:schedule'), Markup.button.callback('🚀 Send Now', 'cp:finish:send')]);
-    rows.push([Markup.button.callback('🚀 Send & 💾 Save as Template', 'cp:finish:send_template')]);
+    if (draft.replaceTarget) {
+      // v2.2.2 REDESIGN: editing a live post now reuses this exact Compose
+      // path (all the same formatting/button/option tools above) instead
+      // of the old, separate, buggy Edit Post menu-based flow. Channel
+      // selection and Schedule/Loop don't apply here - the target message
+      // is already fixed, and a "replace" happens immediately, not later -
+      // so this is the only action shown once a replace target is set.
+      rows.push([Markup.button.callback('▫️▫️ FINISH ▫️▫️', 'nav:noop')]);
+      rows.push([Markup.button.callback('🔄 Replace Live Post', 'cp:finish:replace')]);
+    } else {
+      rows.push([Markup.button.callback('▫️▫️ SAVE ▫️▫️', 'nav:noop')]);
+      rows.push([Markup.button.callback('💾 Save as Template', 'cp:save:template'), Markup.button.callback('📝 Save as Draft', 'cp:save:draft')]);
+      rows.push([Markup.button.callback('▫️▫️ SEND ▫️▫️', 'nav:noop')]);
+      rows.push([Markup.button.callback('⏰ Schedule', 'cp:finish:schedule'), Markup.button.callback('🚀 Send Now', 'cp:finish:send')]);
+      rows.push([Markup.button.callback('🚀 Send & 💾 Save as Template', 'cp:finish:send_template')]);
+    }
     rows.push(backCancelRow('cp:back:formatting'));
   }
   return { text, rows };
@@ -1060,6 +1071,86 @@ async function registerHandlers(bot) {
     const tz = await settingsModel.get('timezone', 'UTC');
     const dt = DateTime.now().setZone(tz).plus({ minutes: preset.minutes }).toUTC();
     await finalizeSchedule(ctx, dt, tz);
+  });
+
+  // v2.2.2 REDESIGN: the actual "replace a live post" action, now reached
+  // via Compose's own Preview/Finish step once draft.replaceTarget is set
+  // (see channels/... -> handlers/replaceLive.js for the entry point).
+  // Picks the least destructive mechanism that actually works: an in-place
+  // edit whenever Telegram's edit API can express the change, falling back
+  // to delete-then-resend ONLY when the content type genuinely changed in
+  // a way editMessageText/Caption/Media cannot express (e.g. text -> photo,
+  // or photo -> video) - that fallback isn't a separate feature the owner
+  // has to choose, it's just what "replace" automatically does when a true
+  // in-place edit isn't possible.
+  bot.action('cp:finish:replace', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = ctx.session.draft;
+    const target = draft.replaceTarget;
+    if (!target) return;
+
+    const item = await savedItems.findById(target.itemId);
+    if (!item) {
+      await ctx.reply('That post is no longer tracked — nothing to replace.');
+      ctx.session = {};
+      return;
+    }
+
+    const refs = item.current_message_refs || [];
+    const keyboard = buildInlineKeyboard(draft.buttons);
+    const sameShape = draft.mediaType === target.originalMediaType
+      && (draft.mediaType === 'text' || draft.mediaItems?.[0]?.file_id === item.media_items?.[0]?.file_id);
+    const mediaChangedSameType = draft.mediaType === target.originalMediaType
+      && draft.mediaType !== 'text' && draft.mediaItems?.[0]?.file_id !== item.media_items?.[0]?.file_id;
+
+    let mode = 'edited in place';
+    try {
+      if (sameShape) {
+        if (draft.mediaType === 'text') {
+          for (const ref of refs) {
+            await ctx.telegram.editMessageText(ref.chat_id, ref.message_id, undefined, draft.caption, {
+              entities: draft.entities, reply_markup: keyboard,
+            });
+          }
+        } else {
+          for (const ref of refs) {
+            await ctx.telegram.editMessageCaption(ref.chat_id, ref.message_id, undefined, draft.caption, {
+              caption_entities: draft.entities, reply_markup: keyboard,
+            });
+          }
+        }
+      } else if (mediaChangedSameType) {
+        for (const ref of refs) {
+          await ctx.telegram.editMessageMedia(ref.chat_id, ref.message_id, undefined, {
+            type: draft.mediaType, media: draft.mediaItems[0].file_id, caption: draft.caption, caption_entities: draft.entities,
+          }, { reply_markup: keyboard });
+        }
+      } else {
+        // Content type genuinely changed shape (e.g. text <-> media, or
+        // photo <-> video) - Telegram's edit* calls cannot express that,
+        // so the only honest way to "replace" is delete the old message
+        // and send the new one fresh.
+        mode = 'swapped for a new message (the content type changed, which Telegram can\'t edit in place)';
+        for (const ref of refs) {
+          await ctx.telegram.deleteMessage(ref.chat_id, ref.message_id).catch(() => {});
+        }
+        const results = await publishSavedItem(ctx.telegram, { ...item, channel_ids: [target.chatId], media_type: draft.mediaType, media_items: draft.mediaItems, caption: draft.caption, entities: draft.entities, buttons: draft.buttons, options: draft.options });
+        const newRefs = results.flatMap((r) => r.messages.map((m) => ({ chat_id: r.chatId, message_id: m.message_id })));
+        await savedItems.updateWithVersion(target.itemId, { current_message_refs: newRefs });
+      }
+
+      await savedItems.updateWithVersion(target.itemId, {
+        media_type: draft.mediaType, media_items: draft.mediaItems, caption: draft.caption,
+        entities: draft.entities, buttons: draft.buttons, options: draft.options,
+      });
+      await ctx.reply(`✅ Replaced — the live post has been ${mode}.`, homeReplyKeyboard());
+    } catch (err) {
+      const msg = await logAction({
+        scene: 'create-post', step: 'replace_live', attempted: `replace live post ${target.itemId} in ${target.chatId}`, error: err, savedItemId: target.itemId,
+      });
+      await ctx.reply(`${msg}\n\n(The live channel message may NOT reflect your edits.)`, homeReplyKeyboard());
+    }
+    ctx.session = {};
   });
 
   bot.action(/^cp:finish:(send|schedule|send_template)$/, requireDraft, async (ctx) => {

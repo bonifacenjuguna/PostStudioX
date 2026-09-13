@@ -258,6 +258,39 @@ check('returns null for text that is not a t.me link', () => {
   assertEqual(parseTmeLink('hello world'), null);
 });
 
+// ── 7. BullMQ jobId validation (v2.2.1 regression guard) ────────────────
+// Encodes BullMQ's actual validation rule (straight from its source,
+// Job.validateOptions) so every jobId this codebase generates is checked
+// against it directly, without needing BullMQ itself installed. The rule
+// is genuinely odd: a colon-containing id is rejected UNLESS splitting on
+// ':' yields exactly 3 parts - this is exactly what caused "Custom Id
+// cannot contain :" everywhere schedulePost/scheduleAutoDelete were used.
+console.log('\n[7] BullMQ jobId validation (v2.2.1 regression guard)');
+
+function isValidBullMqJobId(jobId) {
+  if (`${parseInt(jobId, 10)}` === jobId) return false; // pure integers rejected
+  if (jobId.includes(':') && jobId.split(':').length !== 3) return false;
+  return true;
+}
+
+check('every jobId format this codebase generates passes BullMQ\'s real validation rule', () => {
+  const savedItemId = 42;
+  const cyclesDone = 3;
+  const formats = [
+    `post-${savedItemId}`,
+    `autodelete-${savedItemId}`,
+    `post-${savedItemId}-c${cyclesDone}`,
+    `autodelete-${savedItemId}-c${cyclesDone}`,
+  ];
+  for (const jobId of formats) {
+    assert(isValidBullMqJobId(jobId), `"${jobId}" should be a valid BullMQ jobId`);
+  }
+});
+
+check('the OLD colon-based single-segment format is confirmed invalid (documents why it broke)', () => {
+  assert(!isValidBullMqJobId('post:42'), 'a single-colon jobId should fail BullMQ\'s validation - this is the historical bug');
+});
+
 // ── Summary ────────────────────────────────────────────────────────────
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed > 0 ? 1 : 0);

@@ -12,7 +12,7 @@ function registerMainMenu(bot, scenes) {
     await ctx.reply(
       '✏️ EDIT/REPLACE A LIVE POST\n\n' +
         'Forward the post here, or send its t.me link (only works for channels this bot manages).\n\n' +
-        'You\'ll get the choice to edit it in place, or replace it entirely with a brand-new post.',
+        'You\'ll land in the full editor with everything already filled in — make your changes, then tap 🔄 Replace Live Post when ready.',
       Markup.inlineKeyboard([[Markup.button.callback('❌ Cancel', 'nav:cancel')]])
     );
   });

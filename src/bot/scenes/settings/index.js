@@ -315,10 +315,30 @@ async function registerHandlers(bot) {
 
   bot.action('set:watchdoglog', async (ctx) => {
     await ctx.answerCbQuery();
-    const logs = await watchdogLog.listRecent({ limit: 8 });
-    if (logs.length === 0) return ctx.reply('No watchdog events recorded yet.', Markup.inlineKeyboard([backHomeRow('set:watchdog')]));
-    const lines = logs.map((l) => `${l.level === 'critical' ? '🔴' : l.level === 'warning' ? '🟡' : '⚪'} [${l.category}] ${l.message} (${new Date(l.created_at).toLocaleString()})`);
-    await ctx.reply(`📜 Recent Watchdog Events\n\n${lines.join('\n')}`, Markup.inlineKeyboard([backHomeRow('set:watchdog')]));
+    // v2.2.2 FIX: this only ever read watchdog_log (system-health events),
+    // never action_errors (the per-action structured errors from logAction)
+    // - despite every one of those error messages telling the owner they'd
+    // find it here. Now merges both sources, newest first, so "Also logged
+    // - Settings → Watchdog → Recent Events" is actually true.
+    const { recent: recentActionErrors } = require('../../../services/actionErrors');
+    const [watchdogEvents, actionErrs] = await Promise.all([
+      watchdogLog.listRecent({ limit: 8 }),
+      recentActionErrors(8),
+    ]);
+    const merged = [
+      ...watchdogEvents.map((l) => ({
+        at: l.created_at,
+        line: `${l.level === 'critical' ? '🔴' : l.level === 'warning' ? '🟡' : '⚪'} [${l.category}] ${l.message}`,
+      })),
+      ...actionErrs.map((e) => ({
+        at: e.created_at,
+        line: `🔴 [${e.scene}${e.step ? ` → ${e.step}` : ''}] ${e.attempted} — ${e.reason}${e.error_code ? ` (code: ${e.error_code})` : ''}`,
+      })),
+    ].sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, 12);
+
+    if (merged.length === 0) return ctx.reply('No events recorded yet.', Markup.inlineKeyboard([backHomeRow('set:watchdog')]));
+    const lines = merged.map((m) => `${m.line} (${new Date(m.at).toLocaleString()})`);
+    await ctx.reply(`📜 Recent Events\n\n${lines.join('\n')}`, Markup.inlineKeyboard([backHomeRow('set:watchdog')]));
   });
 
   bot.action('set:backup', async (ctx) => {
