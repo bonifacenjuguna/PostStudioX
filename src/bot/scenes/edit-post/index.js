@@ -11,6 +11,7 @@ const settingsModel = require('../../../db/models/settings');
 const { parseNaturalTime, quickPickPresets } = require('../../../services/naturalTime');
 const { logAction } = require('../../../services/actionErrors');
 const { isEffectivelyAdmin, describeIssue } = require('../../../services/channelPermissions');
+const { resolveLiveMessageRef } = require('../../../services/liveMessageResolver');
 
 function editMenuKeyboard(item, returnTo) {
   const rows = [
@@ -21,6 +22,14 @@ function editMenuKeyboard(item, returnTo) {
   if (item.status === 'sent') {
     rows.push([Markup.button.callback('🖼 Swap Media', `ep:media:${item.id}`)]);
     rows.push([Markup.button.callback('📌 Pin', `ep:pin:${item.id}`)]);
+    // Repair tool: if a post was adopted while the forward_origin bug was
+    // still live (see liveMessageResolver.js), its current_message_refs
+    // can point at the wrong message entirely - edits then "succeed"
+    // (no error) against some other real message instead of this one, with
+    // nothing on this screen able to tell the difference. This lets you
+    // re-supply the live post directly and overwrite the stored ref with
+    // ground truth, instead of that being a dead end.
+    rows.push([Markup.button.callback('🔗 Re-link Live Message', `ep:relink:${item.id}`)]);
   }
   if (item.status === 'scheduled') {
     rows.push([Markup.button.callback('🕐 Reschedule', `ep:reschedule:${item.id}`)]);
@@ -103,6 +112,11 @@ async function handleText(ctx) {
     return;
   }
 
+  if (step === 'awaiting_relink') {
+    await handleRelink(ctx, id);
+    return;
+  }
+
   if (step === 'awaiting_reschedule_time') {
     const tz = await settingsModel.get('timezone', 'UTC');
     const { dt, error } = parseNaturalTime(ctx.message.text, tz);
@@ -172,6 +186,33 @@ function buttonEditTargets(item) {
   const refs = item.current_message_refs || [];
   if (item.media_type === 'media_group') return refs.slice(-1);
   return refs;
+}
+
+// Repair tool for a saved_item whose current_message_refs already point at
+// the wrong message (e.g. adopted while the forward_origin bug in
+// liveMessageResolver.js was still live - that class of bug leaves no
+// trace anywhere in this app's own screens, since editMessageText/Caption
+// against the wrong-but-real message id returns success with no error).
+// Re-supplying the actual live post lets this overwrite the stored ref
+// with ground truth instead of that being a dead end.
+async function handleRelink(ctx, id) {
+  const resolved = await resolveLiveMessageRef(ctx, { channelsModel });
+  if (!resolved) {
+    await ctx.reply('That doesn\'t look like a forward or a t.me link — forward the live post from the channel, or paste its link.');
+    return; // stay in this step so they can retry
+  }
+  if (resolved.error) {
+    await ctx.reply(`🔴 ${resolved.error}`);
+    return;
+  }
+  await savedItems.updateWithVersion(id, {
+    current_message_refs: [{ chat_id: resolved.chatId, message_id: resolved.messageId }],
+  });
+  await ctx.reply(
+    `🔗 Re-linked — this saved post now points at message ${resolved.messageId} in ${resolved.chatId}. Try your edit again.`,
+    homeReplyKeyboard()
+  );
+  ctx.session = {};
 }
 
 // BUGFIX (edit-in-place caption edits silently not applying): this
@@ -470,11 +511,27 @@ async function registerHandlers(bot) {
     if (anyOk) await ctx.reply('📌 Pinned.', homeReplyKeyboard());
     else if (!anyFailed) await ctx.reply('Nothing to pin — no live message is tracked for this post.', homeReplyKeyboard());
   });
+
+  bot.action(/^ep:relink:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const id = parseInt(ctx.match[1], 10);
+    ctx.session = { scene: 'edit-post', editingId: id, step: 'awaiting_relink' };
+    await ctx.reply(
+      'Forward the live post from the channel (or paste its t.me link) and I\'ll point this saved post at that exact message. Use this if edits stop landing on the channel with no error shown — it means this post\'s tracked message id is stale.',
+      flowReplyKeyboard()
+    );
+  });
 }
 
 async function handleMedia(ctx) {
   const step = ctx.session.step;
   const id = ctx.session.editingId;
+
+  if (step === 'awaiting_relink' && id) {
+    await handleRelink(ctx, id);
+    return;
+  }
+
   if (step !== 'awaiting_new_media' || !id) return;
 
   const item = await savedItems.findById(id);

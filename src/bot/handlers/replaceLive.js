@@ -11,72 +11,23 @@
 // fires when nothing else claimed the message first.
 
 const { Markup } = require('telegraf');
-const channelsModel = require('../../db/models/channels');
 const savedItems = require('../../db/models/savedItems');
 const { extractDraftFieldsFromMessage } = require('../../services/messageAdapter');
 const { buildInlineKeyboard } = require('../../services/buttonBuilder');
 const { publishSavedItem } = require('../../services/publisher');
-const { parseTmeLink } = require('../../services/telegramLinks');
+const { resolveLiveMessageRef } = require('../../services/liveMessageResolver');
+const channelsModel = require('../../db/models/channels');
 const { isEffectivelyAdmin, describeIssue } = require('../../services/channelPermissions');
 const { logAction } = require('../../services/actionErrors');
 const { homeReplyKeyboard } = require('../components/navRow');
 
 const GLOBAL_COMMANDS = /^\/(start|help|status|reset)(\s|$)/i;
 
-// BUGFIX: Bot API 7.0+ replaced the legacy forward_from_chat /
-// forward_from_message_id fields with a single forward_origin object.
-// Modern Telegram clients no longer send the legacy fields AT ALL for
-// channel-post forwards, so the old fallback chain here
-// (`forward_from_message_id || ctx.message.message_id`) silently landed on
-// `ctx.message.message_id` - the id of the wrapper message that had just
-// arrived in THIS chat (the bot DM), not the id of the original post in
-// the channel. Those are two completely unrelated numbering spaces per
-// chat, so this pointed every "Edit In Place" / "Replace Entirely" edit at
-// whatever message happened to share that number in the channel (or at
-// nothing, if the channel had fewer messages) instead of the real post -
-// which is why edits reported success ("no error") while the actual live
-// message never changed.
-function extractForwardOrigin(message) {
-  const origin = message.forward_origin;
-  if (origin && origin.type === 'channel' && origin.chat) {
-    return { chatId: String(origin.chat.id), messageId: origin.message_id };
-  }
-  // Kept as a fallback for any older client/bridge that still sends the
-  // legacy pair intact (both fields present together, never mixed with the
-  // wrapper's own id).
-  if (message.forward_from_chat && message.forward_from_message_id) {
-    return { chatId: String(message.forward_from_chat.id), messageId: message.forward_from_message_id };
-  }
-  return null;
-}
-
 async function resolveTarget(ctx) {
-  // Case 1: forwarded straight into this chat.
-  const origin = extractForwardOrigin(ctx.message || {});
-  if (origin) {
-    return { chatId: origin.chatId, messageId: origin.messageId, message: ctx.message };
-  }
-
-  // Case 2: a t.me link - only resolvable for channels this bot manages
-  // (see Compose's Import feature for the same constraint and why).
-  const text = ctx.message?.text?.trim();
-  const parsed = text ? parseTmeLink(text) : null;
-  if (!parsed) return null;
-
-  let chatId = parsed.chatId;
-  if (!chatId) {
-    const channel = await channelsModel.list().then((list) => list.find((c) => c.username?.toLowerCase() === parsed.username.toLowerCase()));
-    if (!channel) return { error: `"${parsed.username}" isn't one of your registered channels — only channels the bot manages can be edited/replaced this way.` };
-    chatId = channel.chat_id;
-  }
-
-  try {
-    const fetched = await ctx.telegram.forwardMessage(ctx.chat.id, chatId, parsed.messageId);
-    await ctx.telegram.deleteMessage(ctx.chat.id, fetched.message_id).catch(() => {});
-    return { chatId: String(chatId), messageId: parsed.messageId, message: fetched };
-  } catch (err) {
-    return { error: (await logAction({ scene: 'replace-live', step: 'resolve', attempted: `read post ${parsed.messageId} from ${chatId} via link`, error: err })) };
-  }
+  const resolved = await resolveLiveMessageRef(ctx, { channelsModel });
+  if (!resolved) return null; // not a forward or link - let other handlers try
+  if (resolved.error) return { error: resolved.error };
+  return resolved;
 }
 
 async function ensureTrackedItem(chatId, messageId, message) {
