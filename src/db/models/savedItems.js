@@ -1,6 +1,6 @@
 const db = require('../pool');
 
-const JSONB_COLUMNS = new Set(['media_items', 'entities', 'buttons', 'options', 'loop_config', 'imported_from']);
+const JSONB_COLUMNS = new Set(['media_items', 'entities', 'buttons', 'options', 'loop_config', 'imported_from', 'current_message_refs']);
 const ARRAY_COLUMNS = new Set(['channel_ids']);
 
 // v1.1.0 (#12): shared by create() and updateWithVersion() so every caller

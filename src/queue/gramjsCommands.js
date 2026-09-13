@@ -25,6 +25,19 @@ async function queueToggleSignMessages(chatId, enabled) {
   return command;
 }
 
+// v2.2.0 (#2, round 2): setChatAdministratorCustomTitle (the Bot API method
+// originally used for this) is confirmed groups/supergroups-only - it
+// simply doesn't work for channels. The underlying MTProto call
+// (channels.EditAdmin's `rank` field) is what actually sets an admin's
+// custom title/signature in a channel, and it's only reachable through a
+// full user session, which is exactly what GramJS provides here - same
+// reasoning as the Sign Messages toggle above.
+async function queueSetChannelSignature(chatId, botUserId, signature) {
+  const command = { type: 'set_channel_signature', chat_id: String(chatId), bot_user_id: botUserId, signature, queued_at: Date.now() };
+  await safeRedis.lpush(COMMAND_QUEUE_KEY, JSON.stringify(command));
+  return command;
+}
+
 // Called from gramjs-monitor's own poll loop - pops everything currently
 // queued (oldest first) so a burst of toggles doesn't get processed out of
 // order.
@@ -43,4 +56,4 @@ async function drainCommands() {
   return commands;
 }
 
-module.exports = { queueToggleSignMessages, drainCommands, COMMAND_QUEUE_KEY };
+module.exports = { queueToggleSignMessages, queueSetChannelSignature, drainCommands, COMMAND_QUEUE_KEY };

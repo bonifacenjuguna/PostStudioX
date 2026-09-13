@@ -2,7 +2,7 @@ const { Markup } = require('telegraf');
 const channelsModel = require('../../../db/models/channels');
 const savedItems = require('../../../db/models/savedItems');
 const mediaLibrary = require('../../../db/models/mediaLibrary');
-const { parseShorthand, stripLinks } = require('../../../services/telegramFormatter');
+const { parseShorthand, parseWithNativeEntities, stripLinks } = require('../../../services/telegramFormatter');
 const { buildInlineKeyboard, colorLabel } = require('../../../services/buttonBuilder');
 const { validateDraft } = require('../../../services/preSendValidator');
 const { sendPreview } = require('../../components/previewRenderer');
@@ -271,11 +271,16 @@ async function handleImportInput(ctx) {
 // silently discarded and only literally-typed shorthand markers worked.
 // Native entities (when present) are trusted as-is instead of re-parsing
 // plain text for shorthand, since they're already the exact real thing.
+// v2.2.0 FIX (#8): now merges native entities with shorthand parsing
+// (parseWithNativeEntities) instead of an either/or choice - see that
+// function's own comment in telegramFormatter.js for why the either/or
+// version silently dropped ++underline++/[text](url) whenever Telegram's
+// client had already auto-formatted anything else in the same message.
 function extractFormattedContent(message) {
   const nativeEntities = message.entities || message.caption_entities;
   const rawText = message.text ?? message.caption ?? '';
   if (nativeEntities && nativeEntities.length > 0) {
-    return { text: rawText, entities: nativeEntities };
+    return parseWithNativeEntities(rawText, nativeEntities);
   }
   return parseShorthand(rawText);
 }
@@ -489,7 +494,17 @@ async function handleMedia(ctx) {
   if (!draft) return;
 
   if (step === 'awaiting_import') {
-    await handleImportInput(ctx);
+    // v2.2.0 FIX (#7): this used to always return without checking whether
+    // handleImportInput actually handled the message - if a forwarded
+    // photo/video/document didn't carry recognizable forward metadata
+    // (some channels strip it from forwards for privacy), the bot went
+    // completely silent instead of saying so.
+    const handled = await handleImportInput(ctx);
+    if (!handled) {
+      await ctx.reply(
+        'Couldn\'t read that as a forward or a post link. If you forwarded it, the source channel may be hiding forward info — try pasting the post\'s t.me link instead, or tap Back to pick a post type.'
+      );
+    }
     return;
   }
 
@@ -592,6 +607,13 @@ async function buildPreviewPanel(draft) {
     rows.push([
       Markup.button.callback(`${draft.options.disable_link_preview ? '🚫🔗' : '🔗'} Link Preview: ${draft.options.disable_link_preview ? 'Off' : 'On'}`, 'cp:opt:toggle:disable_link_preview'),
     ]);
+    // v2.2.0 (#5, round 2): 🚫 Remove All Links already existed in the
+    // Formatting step, but was requested here too, next to the other
+    // per-post options, for visibility - same action, just reachable from
+    // both places now instead of only one.
+    if (draft.caption) {
+      rows.push([Markup.button.callback('🚫 Strip All Links From This Post', 'cp:opt:striplinks')]);
+    }
     rows.push([
       Markup.button.callback(`🔁 Loop Mode: ${draft.options.loop?.enabled ? 'On' : 'Off'}`, 'cp:loop:menu'),
     ]);
@@ -665,7 +687,18 @@ async function doSend(ctx, { undoWindow = true } = {}) {
         await ctx.telegram.editMessageText(msg.chat.id, msg.message_id, undefined, `✅ Posted to ${names}`);
         await clearSession(ctx);
       } catch (err) {
-        await ctx.telegram.sendMessage(msg.chat.id, `🔴 Send failed: ${err.message}`);
+        // v2.2.0 FIX (#9, round 2): this used to send a raw
+        // `Send failed: ${err.message}` with none of the scene/step/reason
+        // structure the rest of the bot's errors use - also worth noting,
+        // per what testing found, that the actual Telegram send can
+        // succeed even when this catch fires (something AFTER the send,
+        // like auto-delete scheduling, is what actually threw) - the
+        // logged "attempted" text reflects that this step covers more than
+        // just the send itself.
+        const errorMsg = await logAction({
+          scene: 'create-post', step: 'grace_period_send', attempted: `finish sending/scheduling post ${item.id} after the undo window`, error: err, savedItemId: item.id,
+        });
+        await ctx.telegram.sendMessage(msg.chat.id, errorMsg).catch(() => {});
       }
     }, 5000);
   } else {
@@ -924,6 +957,15 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     const draft = ctx.session.draft;
     draft.options[key] = !draft.options[key];
+    await backToPreviewPanel(ctx);
+  });
+
+  bot.action('cp:opt:striplinks', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery('Links removed');
+    const draft = ctx.session.draft;
+    const stripped = stripLinks(draft.caption, draft.entities);
+    draft.caption = stripped.text;
+    draft.entities = stripped.entities;
     await backToPreviewPanel(ctx);
   });
 

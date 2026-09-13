@@ -98,7 +98,12 @@ async function publishSavedItem(telegram, item) {
   await savedItems.updateWithVersion(item.id, {
     status: 'sent',
     sent_at: new Date().toISOString(),
-    current_message_refs: JSON.stringify(messageRefs),
+    // v2.2.0 FIX (#3): current_message_refs is now in the model's
+    // JSONB_COLUMNS list, so passing the plain array works - no longer
+    // needs manual JSON.stringify here (this used to be a workaround for
+    // the column being missing from that list, which is exactly what broke
+    // the Replace-Live feature's own write to the same column).
+    current_message_refs: messageRefs,
   });
 
   // Best-effort: remember media used in a real send for the "pick from

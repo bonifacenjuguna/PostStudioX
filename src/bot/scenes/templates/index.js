@@ -152,8 +152,31 @@ async function registerHandlers(bot) {
       [Markup.button.callback('🎨 Use in Compose', `tpl:use:${itemId}`)],
       [Markup.button.callback('🔀 Move to another folder', `tpl:fld:move:${folderId}:${itemId}`)],
       [Markup.button.callback('➖ Remove from folder', `tpl:fld:removeitem:${folderId}:${itemId}`)],
+      // v2.2.0 FIX (#4): this menu had no way to actually delete the item
+      // itself - only the folder as a whole. Removing from a folder just
+      // un-files it, it doesn't delete it (that's what "Remove from
+      // folder" already correctly does), so a real Delete was missing.
+      [Markup.button.callback('🗑 Delete This Item', `tpl:fld:deleteitem:${folderId}:${itemId}`)],
       backHomeRow(`tpl:fld:view:${folderId}`),
     ]));
+  });
+
+  bot.action(/^tpl:fld:deleteitem:(\d+):(\d+)$/, async (ctx) => {
+    const folderId = parseInt(ctx.match[1], 10);
+    const itemId = parseInt(ctx.match[2], 10);
+    await ctx.answerCbQuery();
+    await ctx.reply('Permanently delete this item? This removes it entirely, not just from the folder.', Markup.inlineKeyboard([
+      [Markup.button.callback('✅ Yes, delete it', `tpl:fld:deleteitemconfirm:${folderId}:${itemId}`)],
+      backHomeRow(`tpl:fld:view:${folderId}`),
+    ]));
+  });
+
+  bot.action(/^tpl:fld:deleteitemconfirm:(\d+):(\d+)$/, async (ctx) => {
+    const folderId = parseInt(ctx.match[1], 10);
+    const itemId = parseInt(ctx.match[2], 10);
+    await ctx.answerCbQuery('Deleted');
+    await savedItems.hardDelete(itemId);
+    try { await ctx.editMessageText('🗑 Item deleted.'); } catch (_) {}
   });
 
   bot.action(/^tpl:fld:move:(\d+):(\d+)$/, async (ctx) => {

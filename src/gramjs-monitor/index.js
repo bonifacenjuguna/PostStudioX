@@ -87,6 +87,24 @@ async function processCommands(client) {
         const channel = await client.getEntity(cmd.chat_id);
         await client.invoke(new Api.channels.ToggleSignatures({ channel, enabled: !!cmd.enabled }));
         console.log(`[gramjs-monitor] Set sign_messages=${cmd.enabled} on ${cmd.chat_id}`);
+      } else if (cmd.type === 'set_channel_signature') {
+        // channels.EditAdmin needs the FULL current admin_rights re-sent
+        // alongside the new rank (custom title) - fetch what the bot
+        // currently holds first so this only changes the signature, not
+        // the actual permissions.
+        const channel = await client.getEntity(cmd.chat_id);
+        const participant = await client.invoke(new Api.channels.GetParticipant({ channel, participant: cmd.bot_user_id }));
+        const currentRights = participant?.participant?.adminRights;
+        if (!currentRights) {
+          throw new Error('Could not read the bot\'s current admin rights in that channel - is it actually an admin there?');
+        }
+        await client.invoke(new Api.channels.EditAdmin({
+          channel,
+          userId: cmd.bot_user_id,
+          adminRights: currentRights,
+          rank: cmd.signature,
+        }));
+        console.log(`[gramjs-monitor] Set channel signature on ${cmd.chat_id} to "${cmd.signature}"`);
       } else {
         console.warn(`[gramjs-monitor] Unknown command type: ${cmd.type}`);
       }

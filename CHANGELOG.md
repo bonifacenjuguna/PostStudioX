@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.2.0 — the scheduling pipeline actually runs now (and a big bug batch)
+
+**The big one:** scheduled posts, auto-delete, and Loop mode were silently never executing for anyone who only deployed the single main Railway service. The code that processes those queued jobs (`queue/worker.js`) and the health-check service (`watchdog/index.js`) each required their OWN separate Railway service to ever run at all — easy to miss, since `railway.json` only configures the main bot service. Jobs got queued into Redis truthfully ("Scheduled!" wasn't a lie) and then just sat there forever with nothing listening. Both are now embedded in the main process by default — a single deployed service does everything out of the box. Standalone-service deployment still works unchanged for anyone who wants that isolation (`npm run worker` / `npm run watchdog`); running both at once is safe, BullMQ guarantees a job is only processed once.
+
+**Also fixed this round:**
+- **`current_message_refs` JSON bug**: this JSONB column was missing from the model's serialization list, breaking Replace-Live entirely ("invalid input syntax for type json").
+- **`stripLinks` offset corruption**: same class of bug as the earlier formatter fix, just never applied here — removing a bare URL never recalculated the positions of entities after it. Caused "entity begins in a middle of a UTF-16 symbol."
+- **Native + shorthand formatting were either/or, not merged**: if Telegram's client already auto-formatted anything in a message (its own bold/italic/strike/spoiler shortcuts), this bot's own shorthand (`++underline++`, `[text](url)`) never got a chance to run at all. Now both apply together correctly.
+- **Import silently failing on some forwards**: if a forwarded message didn't carry the expected metadata, the bot went completely silent instead of explaining what happened.
+- **Templates**: folder items had no way to be deleted, only removed-from-folder or the whole folder deleted.
+- **Friendlier "bot not added yet" message** in Channels, instead of the raw diagnostic format (which is now reserved for genuinely unexpected errors).
+- **Channel post signatures now use MTProto (GramJS)**: `setChatAdministratorCustomTitle` (the original approach) is confirmed groups/supergroups-only — doesn't work for channels at all. Routed through the same GramJS command queue as the Sign Messages toggle.
+- **Strip Links is now also in the Preview options**, next to Protect Content, in addition to where it already was in the Formatting step.
+- Cleaned up a raw, unformatted "Send failed" error to use the same structured scene/step/reason format as everywhere else.
+
 ## v2.1.1 — Edit/Replace gets its own home
 
 - **Main menu reorganized**: 📡 Channels moved into ⚙️ Settings (channel management is a one-time-ish config task, not a daily action) — same Channels scene, just reached through Settings → 📡 Channels now.

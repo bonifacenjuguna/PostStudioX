@@ -8,7 +8,7 @@ const {
   snapshotRights,
   grantedVsMissing,
 } = require('../../../services/channelPermissions');
-const { queueToggleSignMessages } = require('../../../queue/gramjsCommands');
+const { queueToggleSignMessages, queueSetChannelSignature } = require('../../../queue/gramjsCommands');
 const { logAction } = require('../../../services/actionErrors');
 
 const CHAT_REQUEST_ID = 9001; // arbitrary constant id for the one request_chat button we use
@@ -92,6 +92,20 @@ async function registerChannelFromChatId(ctx, chatIdOrUsername) {
     await ctx.reply(`✅ Registered: ${saved.title || saved.chat_id}\n\nUse Manage Channel any time to check rights, mute alerts, or set a post signature.`, subScreenReplyKeyboard());
     await enter(ctx);
   } catch (err) {
+    // v2.2.0 FIX (#1, round 2): "chat not found" is the single most common,
+    // fully expected outcome here - it just means the bot hasn't been
+    // added to that chat yet, not an actual system error. Give it its own
+    // plain-language message instead of the raw diagnostic format, which
+    // is meant for genuinely unexpected failures, not routine "not set up
+    // yet" states.
+    const description = err?.description || err?.message || '';
+    if (/chat not found/i.test(description)) {
+      await ctx.reply(
+        "🔍 I couldn't find that chat — it looks like the bot hasn't been added to it yet.\n\n" +
+          'To fix this: open the channel in Telegram, add this bot as an admin (with at least "Post Messages" rights), then try adding it here again.'
+      );
+      return;
+    }
     const msg = await logAction({ scene: 'channels', step: 'register', attempted: `verify admin status for ${target}`, error: err });
     await ctx.reply(`${msg}\n\nMake sure the bot has been added to it first.`);
   }
@@ -145,16 +159,25 @@ async function handleSignatureInput(ctx, chatId, rawText) {
     return;
   }
   try {
+    // v2.2.0 FIX (#2, round 2): setChatAdministratorCustomTitle (the Bot
+    // API method previously used here) is confirmed groups/supergroups-only
+    // - it does not work for channels at all, which is this bot's entire
+    // use case. Routed through the GramJS command queue instead (same
+    // mechanism as the Sign Messages toggle), since setting an admin's
+    // custom title/signature in a CHANNEL is only reachable via a full
+    // MTProto user session, not the Bot API.
     const me = await ctx.telegram.getMe();
-    await ctx.telegram.setChatAdministratorCustomTitle(chatId, me.id, cleaned);
+    await queueSetChannelSignature(chatId, me.id, cleaned);
     await channelsModel.setPostSignature(chatId, cleaned);
     const truncatedNote = cleaned.length < rawText.trim().length ? '\n(shortened/cleaned to fit Telegram\'s 16-character, no-emoji limit)' : '';
     await ctx.reply(
-      `🖋 Post signature set to "${cleaned}".${truncatedNote}\n\n` +
-        'This only shows on posts if the channel also has "Sign messages" turned on - use 🔔 Enable Sign Messages below if it isn\'t yet.'
+      `🖋 Requested: setting post signature to "${cleaned}".${truncatedNote}\n\n` +
+        'This runs through the GramJS monitor service (needs your MTProto session configured) and can take a few seconds. ' +
+        'This only shows on posts if the channel also has "Sign messages" turned on - use 🔔 Enable Sign Messages below if it isn\'t yet.\n\n' +
+        'If it doesn\'t seem to take effect, check ⚙️ Settings → 🛡 Watchdog for the GramJS connection status.'
     );
   } catch (err) {
-    const msg = await logAction({ scene: 'channels', step: 'set_signature', attempted: `set admin custom title on ${chatId}`, error: err, chatId });
+    const msg = await logAction({ scene: 'channels', step: 'set_signature', attempted: `queue channel signature update for ${chatId}`, error: err, chatId });
     await ctx.reply(msg);
   }
   await showChannelView(ctx, chatId);

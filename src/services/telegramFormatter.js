@@ -76,9 +76,8 @@ const MATCHERS = [
 // in [text](url) shorthand at all.
 const RAW_URL_PATTERN = /(https?:\/\/[^\s]+)/g;
 
-function parseShorthand(rawText) {
+function collectShorthandMatches(rawText) {
   const allMatches = [];
-
   for (const matcher of MATCHERS) {
     const re = new RegExp(matcher.regex.source, matcher.regex.flags.includes('g') ? matcher.regex.flags : matcher.regex.flags + 'g');
     let match;
@@ -88,27 +87,31 @@ function parseShorthand(rawText) {
       if (match[0].length === 0) re.lastIndex += 1;
     }
   }
+  return allMatches;
+}
 
-  // Sort by start position; for a genuine tie, registration order (already
-  // the array's insertion order going into allMatches) decides via a
-  // stable sort, which every modern JS engine's Array.prototype.sort is.
-  allMatches.sort((a, b) => a.start - b.start || a.end - b.end);
+// Shared by parseShorthand and parseWithNativeEntities: takes a list of
+// {start, end, built} matches (positions relative to the ORIGINAL rawText),
+// resolves overlaps, and builds the final text + entities in exactly one
+// left-to-right pass - the same single-pass guarantee described above, now
+// reusable for any source of matches, not just shorthand ones.
+function buildFromMatches(rawText, allMatches) {
+  // Sort by start position; for a genuine tie, registration/insertion order
+  // (already the array's order) decides via a stable sort, which every
+  // modern JS engine's Array.prototype.sort is.
+  const sorted = allMatches.slice().sort((a, b) => a.start - b.start || a.end - b.end);
 
   // Resolve overlaps: once a match is accepted, any later (in sort order)
   // match that starts before the accepted match's end is a genuine overlap
   // and is dropped rather than corrupting the single pass below.
   const resolved = [];
   let lastEnd = -1;
-  for (const m of allMatches) {
+  for (const m of sorted) {
     if (m.start < lastEnd) continue;
     resolved.push(m);
     lastEnd = m.end;
   }
 
-  // Single left-to-right pass: every offset is computed against `result`,
-  // which only ever grows by exactly what's been walked so far - nothing
-  // computed here is ever invalidated by a later step, because there is no
-  // later step that touches earlier text.
   let result = '';
   let cursor = 0;
   const entities = [];
@@ -129,6 +132,42 @@ function parseShorthand(rawText) {
   return { text: result, entities };
 }
 
+function parseShorthand(rawText) {
+  return buildFromMatches(rawText, collectShorthandMatches(rawText));
+}
+
+// v2.2.0 FIX (#8): previously, "does this message have native Telegram
+// entities" and "parse it for shorthand markers" were treated as mutually
+// exclusive - if a message had ANY native entity (e.g. Telegram's own
+// client auto-converting **bold** as you type), shorthand parsing was
+// skipped ENTIRELY, silently dropping any marker Telegram's client doesn't
+// recognize itself (++underline++ and [text](url) are NOT native Telegram
+// client shortcuts, only this bot's own shorthand). Native entities are
+// kept exactly as-is (their span is protected from re-parsing, since that
+// text is already real formatting, not literal marker characters), while
+// any shorthand marker found OUTSIDE those spans still gets parsed
+// normally - so a message can mix "Telegram auto-formatted this" and
+// "the bot's own shorthand caught this" correctly in one pass.
+function parseWithNativeEntities(rawText, nativeEntities) {
+  const nativeMatches = (nativeEntities || []).map((e) => ({
+    start: e.offset,
+    end: e.offset + e.length,
+    built: {
+      type: e.type,
+      url: e.url,
+      user: e.user,
+      custom_emoji_id: e.custom_emoji_id,
+      replacement: rawText.slice(e.offset, e.offset + e.length),
+    },
+  }));
+
+  const shorthandMatches = collectShorthandMatches(rawText).filter(
+    (sm) => !nativeMatches.some((nm) => sm.start < nm.end && sm.end > nm.start)
+  );
+
+  return buildFromMatches(rawText, [...nativeMatches, ...shorthandMatches]);
+}
+
 // Telegram counts entity offsets in UTF-16 code units. JS string .length
 // already counts UTF-16 code units (surrogate pairs count as 2), so this is
 // a pass-through — kept as a named helper so the assumption stays explicit
@@ -141,12 +180,60 @@ function utf16LengthAsCodeUnits(str) {
 // sitting as plain text in the caption. Two different operations because
 // they're two different representations, per the product decision to
 // support both.
+//
+// v2.2.0 BUG FIX: this used to build the stripped text with a blind
+// text.replace(RAW_URL_PATTERN, '') call, then separately collapse
+// whitespace - both operations shift every character position after the
+// removed text, but nothing recalculated the offsets of entities that were
+// KEPT (bold, italic, blockquote, etc.), so any such entity sitting after a
+// removed URL ended up pointing at the wrong span - exactly the "entity
+// begins in a middle of a UTF-16 symbol" error reported. Rewritten with the
+// same delta-tracking approach as replaceAllLinks below: every kept
+// entity's offset is explicitly adjusted by exactly how much text was
+// removed before it, in one pass, instead of trusting a lucky coincidence.
 function stripLinks(text, entities) {
-  const keptEntities = (entities || []).filter(
-    (e) => e.type !== 'text_link' && e.type !== 'url' && e.type !== 'text_mention'
-  );
-  const strippedText = text.replace(RAW_URL_PATTERN, '').replace(/\s{2,}/g, ' ').trim();
-  return { text: strippedText, entities: keptEntities };
+  const workingEntities = (entities || [])
+    .filter((e) => e.type !== 'text_link' && e.type !== 'url' && e.type !== 'text_mention')
+    .map((e) => ({ ...e }));
+
+  const rawMatches = [];
+  let m;
+  const re = new RegExp(RAW_URL_PATTERN.source, 'g');
+  while ((m = re.exec(text)) !== null) {
+    rawMatches.push({ index: m.index, length: m[0].length });
+  }
+
+  let resultText = text;
+  let delta = 0;
+  for (const match of rawMatches) {
+    const start = match.index + delta;
+    const end = start + match.length;
+    resultText = resultText.slice(0, start) + resultText.slice(end);
+    for (const e of workingEntities) {
+      if (e.offset >= end) {
+        e.offset -= match.length;
+      } else if (e.offset + e.length > start) {
+        // A kept entity somehow overlapped a stripped URL span - shrink it
+        // rather than leave a now-invalid length. Shouldn't normally happen
+        // (link/mention entities are already filtered out above), but a
+        // safe fallback beats a corrupted offset reaching Telegram.
+        e.length = Math.max(0, e.length - match.length);
+      }
+    }
+    delta -= match.length;
+  }
+
+  // Only trimming leading/trailing whitespace (not collapsing internal
+  // double-spaces, which the previous version did but which isn't safe to
+  // do without re-checking every entity again) - shift every entity left by
+  // exactly how much leading whitespace was removed, so this stays exact.
+  const leadingWhitespaceLength = resultText.length - resultText.replace(/^\s+/, '').length;
+  const trimmedText = resultText.trim();
+  const finalEntities = workingEntities
+    .map((e) => ({ ...e, offset: e.offset - leadingWhitespaceLength }))
+    .filter((e) => e.offset >= 0 && e.offset + e.length <= trimmedText.length);
+
+  return { text: trimmedText, entities: finalEntities };
 }
 
 // Replaces the URL of an existing text_link entity that wraps the given
@@ -209,4 +296,4 @@ function replaceAllLinks(text, entities, newUrl) {
   return { text: resultText, entities: finalEntities, linksFound };
 }
 
-module.exports = { parseShorthand, stripLinks, replaceLinkUrl, replaceAllLinks };
+module.exports = { parseShorthand, parseWithNativeEntities, stripLinks, replaceLinkUrl, replaceAllLinks };

@@ -121,6 +121,33 @@ check('a blockquote appearing after other formats still gets correct offsets', (
   assertEqual(text.slice(quote.offset, quote.offset + quote.length), 'a quote');
 });
 
+check('REGRESSION: stripLinks no longer corrupts offsets of entities after a removed bare URL (v2.2.0 bug)', () => {
+  const parsed = formatter.parseShorthand('see https://example.com then **bold** text');
+  const stripped = formatter.stripLinks(parsed.text, parsed.entities);
+  const bold = stripped.entities.find((e) => e.type === 'bold');
+  assertEqual(stripped.text.slice(bold.offset, bold.offset + bold.length), 'bold');
+});
+
+check('parseWithNativeEntities keeps native entities AND still catches shorthand markers Telegram\'s client did not convert (v2.2.0 fix)', () => {
+  // Simulates: Telegram's client already converted **bold** into a real
+  // bold entity before the bot saw the message, but ++underline++ and
+  // [text](url) are not Telegram client shortcuts and survive as literal
+  // text - both should still be caught.
+  const rawText = 'This is bold and ++underline++ and [a link](https://example.com) here.';
+  const nativeEntities = [{ type: 'bold', offset: 8, length: 4 }]; // "bold"
+  const { text, entities } = formatter.parseWithNativeEntities(rawText, nativeEntities);
+  const bold = entities.find((e) => e.type === 'bold');
+  const underline = entities.find((e) => e.type === 'underline');
+  const link = entities.find((e) => e.type === 'text_link');
+  assert(bold, 'native bold entity should survive');
+  assertEqual(text.slice(bold.offset, bold.offset + bold.length), 'bold');
+  assert(underline, 'shorthand underline should still be parsed');
+  assertEqual(text.slice(underline.offset, underline.offset + underline.length), 'underline');
+  assert(link, 'shorthand link should still be parsed');
+  assertEqual(text.slice(link.offset, link.offset + link.length), 'a link');
+  assertEqual(link.url, 'https://example.com');
+});
+
 // ── 3. channelPermissions ───────────────────────────────────────────────
 console.log('\n[3] channelPermissions');
 const perms = require('./src/services/channelPermissions');

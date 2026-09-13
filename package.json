@@ -1,6 +1,6 @@
 {
   "name": "poststudiox",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "PostStudioX (@PostStudioXBot) — owner-only Telegram bot for composing, scheduling, and managing posts to Telegram channels.",
   "main": "src/index.js",
   "type": "commonjs",

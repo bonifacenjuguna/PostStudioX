@@ -64,6 +64,26 @@ async function main() {
     .then(() => console.log('[startup] Default administrator rights synced.'))
     .catch((err) => console.warn('[startup] Failed to sync default administrator rights (non-fatal):', err.message));
 
+  // v2.2.0 FIX (#10): scheduled posts, auto-delete, and Loop mode all
+  // silently never executed for anyone who only deployed this one Railway
+  // service - the code that actually processes those queued jobs used to
+  // live ONLY in a separate standalone process (queue/worker.js), which
+  // needed its own dedicated Railway service to ever run at all. Now
+  // started embedded, right here, by default - a single deployed service
+  // does everything. Still safe to ALSO run `npm run worker`/`npm run
+  // watchdog` as separate services if that isolation is wanted; BullMQ
+  // guarantees a job is only ever processed once regardless of how many
+  // workers are listening for it.
+  const worker = require('./queue/worker');
+  worker.start({ telegram: bot.telegram })
+    .then(() => console.log('[startup] Embedded queue workers started.'))
+    .catch((err) => console.error('[startup] Failed to start embedded queue workers (schedules/auto-delete/loop will NOT run):', err.message));
+
+  const watchdog = require('./watchdog');
+  watchdog.start()
+    .then(() => console.log('[startup] Embedded watchdog started.'))
+    .catch((err) => console.warn('[startup] Failed to start embedded watchdog (non-fatal):', err.message));
+
   const app = express();
   app.use(express.json());
 

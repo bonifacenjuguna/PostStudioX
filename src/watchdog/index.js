@@ -230,17 +230,27 @@ async function start() {
   console.log('[watchdog] Starting watchdog service (alert-sender only, no update polling)...');
   const intervalMs = config.watchdogPollIntervalMinutes * 60 * 1000;
   await runAllChecks();
-  setInterval(runAllChecks, intervalMs);
-  setInterval(runDailyCleanup, 24 * 60 * 60 * 1000);
+  const checksTimer = setInterval(runAllChecks, intervalMs);
+  const cleanupTimer = setInterval(runDailyCleanup, 24 * 60 * 60 * 1000);
   runDailyCleanup();
   console.log(`[watchdog] Running checks every ${config.watchdogPollIntervalMinutes} minute(s).`);
+  return { stop: () => { clearInterval(checksTimer); clearInterval(cleanupTimer); } };
 }
 
-start().catch((err) => {
-  console.error('[watchdog] Fatal error:', err);
-  process.exit(1);
-});
+module.exports = { start };
 
-process.on('SIGTERM', () => {
-  process.exit(0);
-});
+// v2.2.0 FIX (#10, see queue/worker.js for the full explanation): only
+// self-starts when run as its own standalone script (`npm run watchdog`).
+// The main bot process now starts this itself by default, so a single
+// deployed service gets watchdog checks running too - no separate Railway
+// service required to actually get any monitoring/self-heal behavior.
+if (require.main === module) {
+  start().catch((err) => {
+    console.error('[watchdog] Fatal error:', err);
+    process.exit(1);
+  });
+
+  process.on('SIGTERM', () => {
+    process.exit(0);
+  });
+}
