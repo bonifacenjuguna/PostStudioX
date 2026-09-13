@@ -13,7 +13,7 @@ const { clearSession } = require('../../middleware/session');
 const { DateTime } = require('luxon');
 const settingsModel = require('../../../db/models/settings');
 const { parseNaturalTime, quickPickPresets } = require('../../../services/naturalTime');
-const { logAction } = require('../../../services/actionErrors');
+const { logAction, isNotModifiedError } = require('../../../services/actionErrors');
 
 // ---------------------------------------------------------------------------
 // v2.0.0 REDESIGN — renamed from "New Post" to "Compose" (the old name and
@@ -586,7 +586,7 @@ function loopMenuText(loop) {
   );
 }
 
-async function buildPreviewPanel(draft) {
+async function buildPreviewPanel(draft, ctx) {
   const validation = await validateDraft(draft, { requireChannels: false });
   const rows = [];
   let text = `${header(4)}\n\n`;
@@ -624,9 +624,32 @@ async function buildPreviewPanel(draft) {
       // selection and Schedule/Loop don't apply here - the target message
       // is already fixed, and a "replace" happens immediately, not later -
       // so this is the only action shown once a replace target is set.
+      //
+      // v2.2.3: added a genuine "manage this post" toolkit here too, since
+      // this screen already IS the natural place for post-management
+      // actions (the owner is looking at a specific live post) - Pin/Unpin,
+      // outright Delete, and Bump to Top (re-send the same content fresh,
+      // moving it to the newest spot in the channel) are all immediate
+      // actions on the live message, separate from Replace (which is for
+      // content changes).
+      let isPinned = false;
+      try {
+        const chat = await ctx.telegram.getChat(draft.replaceTarget.chatId);
+        isPinned = chat?.pinned_message?.message_id === draft.replaceTarget.messageId;
+      } catch (_) { /* best-effort - default to "not pinned" label if unknown */ }
+
+      rows.push([Markup.button.callback('▫️▫️ MANAGE THIS POST ▫️▫️', 'nav:noop')]);
+      rows.push([
+        Markup.button.callback(isPinned ? '📍 Unpin' : '📌 Pin', 'cp:manage:togglepin'),
+        Markup.button.callback('⬆️ Bump to Top', 'cp:manage:bump'),
+      ]);
+      rows.push([Markup.button.callback('🗑 Delete This Post', 'cp:manage:delete')]);
       rows.push([Markup.button.callback('▫️▫️ FINISH ▫️▫️', 'nav:noop')]);
       rows.push([Markup.button.callback('🔄 Replace Live Post', 'cp:finish:replace')]);
     } else {
+      rows.push([
+        Markup.button.callback(`${draft.options.pinAfterSend ? '📌' : '📍'} Pin After Posting: ${draft.options.pinAfterSend ? 'On' : 'Off'}`, 'cp:opt:toggle:pinAfterSend'),
+      ]);
       rows.push([Markup.button.callback('▫️▫️ SAVE ▫️▫️', 'nav:noop')]);
       rows.push([Markup.button.callback('💾 Save as Template', 'cp:save:template'), Markup.button.callback('📝 Save as Draft', 'cp:save:draft')]);
       rows.push([Markup.button.callback('▫️▫️ SEND ▫️▫️', 'nav:noop')]);
@@ -646,7 +669,7 @@ async function goToPreview(ctx) {
   ctx.session.step = 'preview';
   const draft = ctx.session.draft;
   await sendPreview(ctx, draft);
-  const { text, rows } = await buildPreviewPanel(draft);
+  const { text, rows } = await buildPreviewPanel(draft, ctx);
   await showStep(ctx, text, Markup.inlineKeyboard(rows), { forceNew: true });
 }
 
@@ -659,7 +682,7 @@ async function goToPreview(ctx) {
 async function backToPreviewPanel(ctx) {
   ctx.session.step = 'preview';
   const draft = ctx.session.draft;
-  const { text, rows } = await buildPreviewPanel(draft);
+  const { text, rows } = await buildPreviewPanel(draft, ctx);
   await showStep(ctx, text, Markup.inlineKeyboard(rows));
 }
 
@@ -690,10 +713,17 @@ async function doSend(ctx, { undoWindow = true } = {}) {
         const fresh = await savedItems.findById(item.id);
         if (!fresh || fresh.status !== 'draft') return; // undone or already handled
         await publishSavedItem(ctx.telegram, fresh);
+        const refreshed = await savedItems.findById(item.id);
         if (draft.options.autoDeleteMinutes) {
           const at = new Date(Date.now() + draft.options.autoDeleteMinutes * 60000).toISOString();
-          const refreshed = await savedItems.findById(item.id);
           await scheduleAutoDelete(item.id, at, (refreshed.current_message_refs || []));
+        }
+        if (draft.options.pinAfterSend) {
+          for (const ref of refreshed.current_message_refs || []) {
+            await ctx.telegram.pinChatMessage(ref.chat_id, ref.message_id).catch((err) => {
+              logAction({ scene: 'create-post', step: 'pin_after_send', attempted: `pin ${ref.chat_id}/${ref.message_id}`, error: err, savedItemId: item.id }).catch(() => {});
+            });
+          }
         }
         await ctx.telegram.editMessageText(msg.chat.id, msg.message_id, undefined, `✅ Posted to ${names}`);
         await clearSession(ctx);
@@ -714,6 +744,12 @@ async function doSend(ctx, { undoWindow = true } = {}) {
     }, 5000);
   } else {
     await publishSavedItem(ctx.telegram, item);
+    if (draft.options.pinAfterSend) {
+      const refreshed = await savedItems.findById(item.id);
+      for (const ref of refreshed.current_message_refs || []) {
+        await ctx.telegram.pinChatMessage(ref.chat_id, ref.message_id).catch(() => {});
+      }
+    }
     await ctx.reply(`✅ Posted to ${names}`, homeReplyKeyboard());
     ctx.session = {};
   }
@@ -1083,6 +1119,84 @@ async function registerHandlers(bot) {
   // or photo -> video) - that fallback isn't a separate feature the owner
   // has to choose, it's just what "replace" automatically does when a true
   // in-place edit isn't possible.
+  // v2.2.3: "manage this post" immediate actions - separate from Replace
+  // (which is for content changes), these act on the live message right
+  // away and redraw the panel so the Pin/Unpin label stays accurate.
+  bot.action('cp:manage:togglepin', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = ctx.session.draft;
+    const { chatId, messageId } = draft.replaceTarget;
+    try {
+      const chat = await ctx.telegram.getChat(chatId);
+      const currentlyPinned = chat?.pinned_message?.message_id === messageId;
+      if (currentlyPinned) {
+        await ctx.telegram.unpinChatMessage(chatId, messageId);
+      } else {
+        await ctx.telegram.pinChatMessage(chatId, messageId);
+      }
+    } catch (err) {
+      const msg = await logAction({ scene: 'create-post', step: 'manage_pin', attempted: `toggle pin on ${chatId}/${messageId}`, error: err });
+      await ctx.reply(msg);
+      return;
+    }
+    await backToPreviewPanel(ctx);
+  });
+
+  bot.action('cp:manage:delete', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    const { chatId, messageId, itemId } = ctx.session.draft.replaceTarget;
+    await ctx.reply('Permanently delete this live post? This cannot be undone.', Markup.inlineKeyboard([
+      [Markup.button.callback('✅ Yes, delete it', `cp:manage:deleteconfirm:${itemId}:${chatId}:${messageId}`)],
+      [Markup.button.callback('❌ Cancel', 'nav:cancel')],
+    ]));
+  });
+
+  bot.action(/^cp:manage:deleteconfirm:(\d+):(.+):(\d+)$/, async (ctx) => {
+    const [, itemId, chatId, messageId] = ctx.match;
+    await ctx.answerCbQuery('Deleted');
+    try {
+      await ctx.telegram.deleteMessage(chatId, parseInt(messageId, 10));
+      await savedItems.updateWithVersion(parseInt(itemId, 10), { status: 'deleted' });
+      await ctx.reply('🗑 Post deleted from the channel.', homeReplyKeyboard());
+    } catch (err) {
+      const msg = await logAction({ scene: 'create-post', step: 'manage_delete', attempted: `delete live message ${chatId}/${messageId}`, error: err, savedItemId: parseInt(itemId, 10) });
+      await ctx.reply(msg, homeReplyKeyboard());
+    }
+    ctx.session = {};
+  });
+
+  bot.action('cp:manage:bump', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = ctx.session.draft;
+    const { itemId, chatId, messageId } = draft.replaceTarget;
+    await ctx.reply(
+      '⬆️ Bump this post to the top? It gets deleted here and resent fresh with the exact same content — useful for pushing it back to the newest spot in a busy channel.',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('✅ Yes, bump it', `cp:manage:bumpconfirm:${itemId}`)],
+        [Markup.button.callback('❌ Cancel', 'nav:cancel')],
+      ])
+    );
+  });
+
+  bot.action(/^cp:manage:bumpconfirm:(\d+)$/, async (ctx) => {
+    const itemId = parseInt(ctx.match[1], 10);
+    await ctx.answerCbQuery();
+    const draft = ctx.session.draft;
+    const { chatId, messageId } = draft.replaceTarget;
+    try {
+      await ctx.telegram.deleteMessage(chatId, messageId).catch(() => {});
+      const item = await savedItems.findById(itemId);
+      const results = await publishSavedItem(ctx.telegram, { ...item, channel_ids: [chatId] });
+      const newRefs = results.flatMap((r) => r.messages.map((m) => ({ chat_id: r.chatId, message_id: m.message_id })));
+      await savedItems.updateWithVersion(itemId, { current_message_refs: newRefs });
+      await ctx.reply('⬆️ Bumped — same content, fresh spot at the top.', homeReplyKeyboard());
+    } catch (err) {
+      const msg = await logAction({ scene: 'create-post', step: 'manage_bump', attempted: `bump post ${itemId} in ${chatId}`, error: err, savedItemId: itemId });
+      await ctx.reply(msg, homeReplyKeyboard());
+    }
+    ctx.session = {};
+  });
+
   bot.action('cp:finish:replace', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     const draft = ctx.session.draft;
@@ -1145,6 +1259,18 @@ async function registerHandlers(bot) {
       });
       await ctx.reply(`✅ Replaced — the live post has been ${mode}.`, homeReplyKeyboard());
     } catch (err) {
+      if (isNotModifiedError(err)) {
+        // Nothing actually changed (e.g. Strip Links found no links to
+        // remove) - Telegram correctly rejects a no-op edit, but that's a
+        // success from the owner's point of view, not a failure.
+        await savedItems.updateWithVersion(target.itemId, {
+          media_type: draft.mediaType, media_items: draft.mediaItems, caption: draft.caption,
+          entities: draft.entities, buttons: draft.buttons, options: draft.options,
+        });
+        await ctx.reply('✅ Already up to date — nothing in your edit actually changed the post, so no live edit was needed.', homeReplyKeyboard());
+        ctx.session = {};
+        return;
+      }
       const msg = await logAction({
         scene: 'create-post', step: 'replace_live', attempted: `replace live post ${target.itemId} in ${target.chatId}`, error: err, savedItemId: target.itemId,
       });

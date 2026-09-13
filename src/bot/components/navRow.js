@@ -43,7 +43,7 @@ function homeReplyKeyboard() {
   // which was previously only reachable ambiently (forward/link with no
   // active flow) and had no discoverable entry point.
   return Markup.keyboard([
-    ['🎨 Compose', '✏️ Edit/Replace', '🗂 Templates'],
+    ['🎨 Compose', '✏️ Edit', '🗂 Templates'],
     ['⏰ Scheduled', '📜 History', '⚙️ Settings'],
   ]).resize();
 }

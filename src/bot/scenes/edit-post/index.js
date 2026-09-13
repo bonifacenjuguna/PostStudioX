@@ -9,7 +9,7 @@ const { flowReplyKeyboard, homeReplyKeyboard, backHomeRow } = require('../../com
 const { DateTime } = require('luxon');
 const settingsModel = require('../../../db/models/settings');
 const { parseNaturalTime, quickPickPresets } = require('../../../services/naturalTime');
-const { logAction } = require('../../../services/actionErrors');
+const { logAction, isNotModifiedError } = require('../../../services/actionErrors');
 const { isEffectivelyAdmin, describeIssue } = require('../../../services/channelPermissions');
 
 function editMenuKeyboard(item, returnTo) {
@@ -151,6 +151,11 @@ async function applyLiveEdit(ctx, item) {
         });
       }
     } catch (err) {
+      // Telegram rejects an edit whose content is byte-identical to what's
+      // already live ("message is not modified") - that's a success from
+      // the owner's point of view (nothing needed to change), not a
+      // failure worth reporting.
+      if (isNotModifiedError(err)) continue;
       console.warn(`[edit-post] Live caption edit failed for ${ref.chat_id}/${ref.message_id}: ${err.message}`);
       failures.push({ ref, err });
     }

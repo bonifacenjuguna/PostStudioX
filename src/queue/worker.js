@@ -65,6 +65,14 @@ function buildWorkers(telegram, connection) {
       const results = await publishSavedItem(telegram, item);
       const refs = results.flatMap((r) => r.messages.map((m) => ({ chat_id: r.chatId, message_id: m.message_id })));
 
+      if (item.options?.pinAfterSend) {
+        for (const ref of refs) {
+          await telegram.pinChatMessage(ref.chat_id, ref.message_id).catch((err) => {
+            console.warn(`[worker] Pin-after-send failed for ${ref.chat_id}/${ref.message_id}: ${err.message}`);
+          });
+        }
+      }
+
       // Loop mode's delete timing is dynamic (stay_seconds from now), so it
       // takes priority over the fixed auto_delete_at column - a looping post
       // defines its own rhythm rather than a one-off delete time.

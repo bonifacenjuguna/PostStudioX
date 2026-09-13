@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.2.3 — "message is not modified" fixed, and a real post-management toolkit
+
+- **Fixed "message is not modified" being shown as an error.** Telegram rejects an edit outright if the new content is byte-identical to what's already live (e.g. Strip Links finding nothing to strip) — that's a harmless no-op, not a failure. Now recognized and treated as success everywhere a live edit happens (Replace Live Post, and Edit Post's caption/rollback/strip-links flows, which had the same latent issue).
+- **Renamed the main-menu button** from ✏️ Edit/Replace to just **✏️ Edit** — it edits; the swap-when-necessary behavior happens automatically underneath, it was never a separate thing the button name needed to carry.
+- **New: a real "Manage This Post" toolkit**, added right where you're already looking at a specific live post (the Edit screen):
+  - **📌 Pin / 📍 Unpin** — toggles instantly, label reflects the post's actual current pin status
+  - **⬆️ Bump to Top** — deletes and resends the exact same content, for pushing an important post back to the newest spot in a busy channel
+  - **🗑 Delete This Post** — removes it from the channel outright
+  - **📌 Pin After Posting** also added as an option in regular Compose (and Scheduled/Loop sends), for pinning a brand-new post the moment it goes live
+
 ## v2.2.2 — Edit/Replace rebuilt on Compose, and error logs finally visible
 
 - **Removed "Replace Entirely" as a separate choice.** Forwarding or linking a live post now goes straight into the full Compose editor — the exact same formatting/button/option tools used everywhere else — pre-filled with the post's existing content. One action at the end: **🔄 Replace Live Post**.

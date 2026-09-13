@@ -51,4 +51,15 @@ async function clearAll() {
   await db().query('DELETE FROM action_errors');
 }
 
-module.exports = { logAction, formatErrorMessage, recent, clearAll };
+// Telegram rejects an edit outright if the new content is byte-identical to
+// what's already live ("message is not modified") - a harmless no-op, not
+// a real failure. Shared here so every live-edit call site treats it the
+// same way instead of surfacing it as an error (which is exactly what
+// happened when Strip Links found nothing to strip: the "edit" produced
+// identical content, and Telegram's rejection of that was shown as a bug).
+function isNotModifiedError(err) {
+  const description = err?.description || err?.message || '';
+  return /message is not modified/i.test(description);
+}
+
+module.exports = { logAction, formatErrorMessage, recent, clearAll, isNotModifiedError };

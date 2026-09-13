@@ -194,6 +194,13 @@ check('formatErrorMessage names scene/step/attempted/reason, never a bare generi
   assert(msg.includes('403'));
 });
 
+check('isNotModifiedError recognizes Telegram\'s no-op-edit rejection and nothing else', () => {
+  const { isNotModifiedError } = require('./src/services/actionErrors');
+  assert(isNotModifiedError({ description: 'Bad Request: message is not modified: specified new message content and reply markup are exactly the same' }));
+  assert(!isNotModifiedError({ description: 'Bad Request: chat not found' }));
+  assert(!isNotModifiedError({}));
+});
+
 // ── 5. naturalTime — casual scheduling parser ───────────────────────────
 console.log('\n[5] naturalTime');
 try {

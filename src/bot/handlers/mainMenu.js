@@ -7,7 +7,7 @@ function registerMainMenu(bot, scenes) {
     await scenes.createPost.enter(ctx);
   });
 
-  bot.hears('✏️ Edit/Replace', async (ctx) => {
+  bot.hears('✏️ Edit', async (ctx) => {
     ctx.session = {};
     await ctx.reply(
       '✏️ EDIT/REPLACE A LIVE POST\n\n' +
