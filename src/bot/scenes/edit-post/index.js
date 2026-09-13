@@ -4,7 +4,7 @@ const channelsModel = require('../../../db/models/channels');
 const { parseShorthand, stripLinks } = require('../../../services/telegramFormatter');
 const { publishSavedItem } = require('../../../services/publisher');
 const { schedulePost, cancelScheduledPost } = require('../../../queue/queues');
-const { buildInlineKeyboard } = require('../../../services/buttonBuilder');
+const { buildInlineKeyboard, colorLabel } = require('../../../services/buttonBuilder');
 const { flowReplyKeyboard, homeReplyKeyboard, backHomeRow } = require('../../components/navRow');
 const { DateTime } = require('luxon');
 const settingsModel = require('../../../db/models/settings');
@@ -60,10 +60,47 @@ async function handleText(ctx) {
     const { text, entities } = parseShorthand(ctx.message.text);
     const item = await savedItems.updateWithVersion(id, { caption: text, entities });
     if (item.status === 'sent') {
-      await applyLiveEdit(ctx, item);
+      const result = await applyLiveEdit(ctx, item);
+      if (!result.ok) {
+        const msg = await logAction({
+          scene: 'edit-post', step: 'apply_live_caption', attempted: `edit caption live for post ${id}`,
+          error: result.error || new Error('no live message is tracked for this post'), savedItemId: id,
+        });
+        await ctx.reply(`${msg}\n\n(The new caption is saved on this post's record — use 🕓 Version History if you need to roll it back.)`, homeReplyKeyboard());
+        ctx.session = {};
+        return;
+      }
     }
     await ctx.reply('✅ Caption updated.', homeReplyKeyboard());
     ctx.session = {};
+  }
+
+  if (step === 'awaiting_new_button_text') {
+    ctx.session.buttonDraft = { text: ctx.message.text.trim() };
+    ctx.session.step = 'awaiting_new_button_url';
+    await ctx.reply(
+      'Now send the URL this button should open — or type NOTE: followed by a short message to make a "tap to reveal" note button instead of a link.',
+      flowReplyKeyboard()
+    );
+    return;
+  }
+
+  if (step === 'awaiting_new_button_url') {
+    const raw = ctx.message.text.trim();
+    if (/^note:/i.test(raw)) {
+      ctx.session.buttonDraft.note = raw.replace(/^note:/i, '').trim().slice(0, 180);
+    } else {
+      ctx.session.buttonDraft.url = raw;
+    }
+    ctx.session.step = 'awaiting_new_button_style';
+    await ctx.reply(
+      'Pick a color style for this button:',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('🔵 Primary', `ep:btnstyle:${id}:primary`), Markup.button.callback('🔴 Danger', `ep:btnstyle:${id}:danger`)],
+        [Markup.button.callback('🟢 Success', `ep:btnstyle:${id}:success`), Markup.button.callback('⚪ Default', `ep:btnstyle:${id}:default`)],
+      ])
+    );
+    return;
   }
 
   if (step === 'awaiting_reschedule_time') {
@@ -118,17 +155,68 @@ async function cloneToChannel(ctx, id, target) {
   ctx.session = {};
 }
 
+// A media-group post has one message per media item, plus (if it has
+// buttons) one extra trailing plain-text message carrying the reply_markup
+// (see publisher.js's sendMediaGroup - Telegram doesn't allow reply_markup
+// directly on album items). Only the FIRST message in a media group can
+// carry a caption, and only the LAST (the buttons carrier, when present)
+// can have its reply_markup edited - so caption edits and button edits
+// target different refs for a media group.
+function captionEditTargets(item) {
+  const refs = item.current_message_refs || [];
+  if (item.media_type === 'media_group') return refs.slice(0, 1);
+  return refs;
+}
+
+function buttonEditTargets(item) {
+  const refs = item.current_message_refs || [];
+  if (item.media_type === 'media_group') return refs.slice(-1);
+  return refs;
+}
+
+// BUGFIX (edit-in-place caption edits silently not applying): this
+// previously always called editMessageCaption, which Telegram rejects for
+// a plain text message ("there is no caption in the message to edit") -
+// captions only exist on media messages. Text-only posts (media_type
+// 'text', the majority of posts) need editMessageText instead. The error
+// was also only ever console.warn'd, never surfaced - so the bot always
+// replied "✅ Caption updated" regardless of whether Telegram actually
+// accepted the edit, which is why the channel wouldn't reflect the change
+// even though every screen in the bot (preview, "Editing: ...", forwarding
+// the link back in) looked correct - all of those render from this app's
+// own database, not from a live re-fetch of the channel post, so a failed
+// live edit was invisible until you checked the channel by eye.
+// Returns { ok, error } so callers can tell the user the truth instead of
+// assuming success.
 async function applyLiveEdit(ctx, item) {
-  const refs = (item.current_message_refs || []);
-  for (const ref of refs) {
+  const targets = captionEditTargets(item);
+  if (targets.length === 0) {
+    return { ok: false, error: new Error('no live message is tracked for this post') };
+  }
+  const isTextOnly = !item.media_type || item.media_type === 'text';
+  const entities = item.entities && item.entities.length ? item.entities : undefined;
+
+  let anyOk = false;
+  let lastErr = null;
+  for (const ref of targets) {
     try {
-      await ctx.telegram.editMessageCaption(ref.chat_id, ref.message_id, undefined, item.caption, {
-        caption_entities: item.entities,
-      });
+      if (isTextOnly) {
+        await ctx.telegram.editMessageText(ref.chat_id, ref.message_id, undefined, item.caption, {
+          entities,
+          reply_markup: buildInlineKeyboard(item.buttons),
+        });
+      } else {
+        await ctx.telegram.editMessageCaption(ref.chat_id, ref.message_id, undefined, item.caption, {
+          caption_entities: entities,
+        });
+      }
+      anyOk = true;
     } catch (err) {
+      lastErr = err;
       console.warn(`[edit-post] Live caption edit failed for ${ref.chat_id}/${ref.message_id}: ${err.message}`);
     }
   }
+  return { ok: anyOk, error: lastErr };
 }
 
 function rescheduleKeyboard(id) {
@@ -154,22 +242,86 @@ async function registerHandlers(bot) {
     const item = await savedItems.findById(id);
     const stripped = stripLinks(item.caption, item.entities);
     const updated = await savedItems.updateWithVersion(id, { caption: stripped.text, entities: stripped.entities });
-    if (updated.status === 'sent') await applyLiveEdit(ctx, updated);
+    if (updated.status === 'sent') {
+      const result = await applyLiveEdit(ctx, updated);
+      if (!result.ok) {
+        const msg = await logAction({
+          scene: 'edit-post', step: 'apply_live_striplinks', attempted: `strip links live for post ${id}`,
+          error: result.error || new Error('no live message is tracked for this post'), savedItemId: id,
+        });
+        await ctx.reply(msg, homeReplyKeyboard());
+        return;
+      }
+    }
     await ctx.reply('🧹 Links stripped from this post.', homeReplyKeyboard());
   });
 
+  // BUGFIX (#1): this used to tell you, when there were no buttons yet, to
+  // "Use 🎨 Compose to add buttons, then save changes here" - but Compose
+  // has no way to save into an existing post; it only creates and sends a
+  // brand-new one. Following that instruction to its only actual endpoint
+  // (🚀 Send Now) posted a duplicate message to the channel instead of
+  // adding a button to the post you meant to edit. Replaced with a real
+  // in-place "add a button" flow (mirrors Compose's own button wizard,
+  // then applies live via editMessageReplyMarkup like every other
+  // edit-in-place action here).
   bot.action(/^ep:buttons:(\d+)$/, async (ctx) => {
     await ctx.answerCbQuery();
     const id = parseInt(ctx.match[1], 10);
     const item = await savedItems.findById(id);
     const buttons = item.buttons || [];
-    if (buttons.length === 0) {
-      await ctx.reply('No buttons on this post yet. Use 🎨 Compose to add buttons, then save changes here.');
+    const rows = buttons.flat().map((b, i) => [Markup.button.callback(`🗑 ${b.text}`, `ep:btndelete:${id}:${i}`)]);
+    rows.push([Markup.button.callback('➕ Add Button', `ep:btnadd:${id}`)]);
+    rows.push([Markup.button.callback('🏠 Home', 'nav:home')]);
+    await ctx.reply(
+      buttons.length === 0 ? 'No buttons on this post yet. Tap ➕ Add Button to add one.' : 'Tap a button to delete it, or add a new one:',
+      Markup.inlineKeyboard(rows)
+    );
+  });
+
+  bot.action(/^ep:btnadd:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const id = parseInt(ctx.match[1], 10);
+    ctx.session = { scene: 'edit-post', editingId: id, step: 'awaiting_new_button_text' };
+    await ctx.reply('Send the button label text:', flowReplyKeyboard());
+  });
+
+  bot.action(/^ep:btnstyle:(\d+):(.+)$/, async (ctx) => {
+    const id = parseInt(ctx.match[1], 10);
+    const style = ctx.match[2];
+    await ctx.answerCbQuery();
+    const draft = ctx.session.buttonDraft;
+    if (!draft) {
+      await ctx.reply('That button draft expired — start again with 🔘 Edit Buttons → ➕ Add Button.', homeReplyKeyboard());
       return;
     }
-    const rows = buttons.flat().map((b, i) => [Markup.button.callback(`🗑 ${b.text}`, `ep:btndelete:${id}:${i}`)]);
-    rows.push([Markup.button.callback('🏠 Home', 'nav:home')]);
-    await ctx.reply('Tap a button to delete it:', Markup.inlineKeyboard(rows));
+    const btn = { text: draft.text };
+    if (draft.note) btn.note = draft.note;
+    else btn.url = draft.url;
+    if (style !== 'default') btn.style = style;
+
+    const item = await savedItems.findById(id);
+    const newButtons = (item.buttons && item.buttons.length) ? item.buttons.map((row) => [...row]) : [[]];
+    newButtons[newButtons.length - 1].push(btn);
+    const updated = await savedItems.updateWithVersion(id, { buttons: newButtons });
+
+    let liveOk = true;
+    if (updated.status === 'sent') {
+      const targets = buttonEditTargets(updated);
+      for (const ref of targets) {
+        try {
+          await ctx.telegram.editMessageReplyMarkup(ref.chat_id, ref.message_id, undefined, buildInlineKeyboard(newButtons));
+        } catch (err) {
+          liveOk = false;
+          console.warn(`[edit-post] Live button add failed: ${err.message}`);
+        }
+      }
+    }
+    ctx.session = {};
+    await ctx.reply(
+      liveOk ? `✅ Button added (${colorLabel(style)}).` : `⚠️ Button saved on the post, but the live channel message could not be updated.`,
+      homeReplyKeyboard()
+    );
   });
 
   bot.action(/^ep:btndelete:(\d+):(\d+)$/, async (ctx) => {
@@ -181,17 +333,21 @@ async function registerHandlers(bot) {
     flat.splice(idx, 1);
     const newButtons = flat.length ? [flat] : [];
     const updated = await savedItems.updateWithVersion(id, { buttons: newButtons });
+    let liveOk = true;
     if (updated.status === 'sent') {
-      const refs = (updated.current_message_refs || []);
-      for (const ref of refs) {
+      const targets = buttonEditTargets(updated);
+      for (const ref of targets) {
         try {
           await ctx.telegram.editMessageReplyMarkup(ref.chat_id, ref.message_id, undefined, buildInlineKeyboard(newButtons));
         } catch (err) {
+          liveOk = false;
           console.warn(`[edit-post] Live button edit failed: ${err.message}`);
         }
       }
     }
-    try { await ctx.editMessageText('✅ Button removed.'); } catch (_) {}
+    try {
+      await ctx.editMessageText(liveOk ? '✅ Button removed.' : '⚠️ Removed from the saved post, but the live channel message could not be updated.');
+    } catch (_) {}
   });
 
   bot.action(/^ep:reschedule:(\d+)$/, async (ctx) => {
@@ -234,8 +390,14 @@ async function registerHandlers(bot) {
     const versionId = parseInt(ctx.match[2], 10);
     await ctx.answerCbQuery('Rolled back');
     const updated = await savedItems.rollbackToVersion(id, versionId);
-    if (updated.status === 'sent') await applyLiveEdit(ctx, updated);
-    try { await ctx.editMessageText('↩️ Rolled back to that version.'); } catch (_) {}
+    let liveOk = true;
+    if (updated.status === 'sent') {
+      const result = await applyLiveEdit(ctx, updated);
+      liveOk = result.ok;
+    }
+    try {
+      await ctx.editMessageText(liveOk ? '↩️ Rolled back to that version.' : '↩️ Rolled back in the database, but the live channel message could not be updated to match (check the channel, and Settings → Watchdog → Recent Events for the reason).');
+    } catch (_) {}
   });
 
   bot.action(/^ep:clone:(\d+)$/, async (ctx) => {
@@ -294,12 +456,19 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     const item = await savedItems.findById(id);
     const refs = (item.current_message_refs || []);
+    let anyOk = false;
+    let anyFailed = false;
     for (const ref of refs) {
-      try { await ctx.telegram.pinChatMessage(ref.chat_id, ref.message_id); } catch (err) {
+      try {
+        await ctx.telegram.pinChatMessage(ref.chat_id, ref.message_id);
+        anyOk = true;
+      } catch (err) {
+        anyFailed = true;
         await ctx.reply(`🔴 Pin failed: ${err.message}`);
       }
     }
-    await ctx.reply('📌 Pinned.', homeReplyKeyboard());
+    if (anyOk) await ctx.reply('📌 Pinned.', homeReplyKeyboard());
+    else if (!anyFailed) await ctx.reply('Nothing to pin — no live message is tracked for this post.', homeReplyKeyboard());
   });
 }
 
@@ -329,16 +498,22 @@ async function handleMedia(ctx) {
 
   const updated = await savedItems.updateWithVersion(id, { media_items: [{ file_id: fileId, type }] });
   const refs = (updated.current_message_refs || []);
+  let anyFailed = false;
   for (const ref of refs) {
     try {
       const mediaPayload = { type, media: fileId, caption: updated.caption, caption_entities: updated.entities };
       await ctx.telegram.editMessageMedia(ref.chat_id, ref.message_id, undefined, mediaPayload);
     } catch (err) {
+      anyFailed = true;
       const msg = await logAction({ scene: 'edit-post', step: 'media_swap', attempted: `swap media on ${ref.chat_id}/${ref.message_id}`, error: err, savedItemId: id });
       await ctx.reply(msg);
     }
   }
-  await ctx.reply('🖼 Media replaced.', homeReplyKeyboard());
+  if (!anyFailed) {
+    await ctx.reply('🖼 Media replaced.', homeReplyKeyboard());
+  } else {
+    await ctx.reply('⚠️ Saved locally, but the channel message could not be updated (see error above) — use 🕓 Version History to roll back if needed.', homeReplyKeyboard());
+  }
   ctx.session = {};
 }
 

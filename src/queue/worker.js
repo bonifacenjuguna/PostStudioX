@@ -72,13 +72,19 @@ function buildWorkers(telegram, connection) {
         const deleteAt = new Date(Date.now() + item.loop_config.stay_seconds * 1000).toISOString();
         // Cycle-suffixed jobId: BullMQ keeps completed job history around
         // (removeOnComplete keeps the last 100, see queues.js), so reusing
-        // the plain autodelete:<id> jobId on every loop cycle would collide
+        // the plain autodelete-<id> jobId on every loop cycle would collide
         // with the still-remembered previous cycle's completed job and throw.
+        // BUGFIX: this used to be `autodelete:${id}:c${cycle}` - a ':' in a
+        // custom job id makes BullMQ throw "Custom Id cannot contain :"
+        // immediately (colons are reserved for its own Redis key
+        // namespacing), which is what surfaced as the grace_period_send
+        // error right after a post actually went out successfully. '-' is
+        // a safe delimiter.
         // NOTE for the Scheduled-screen "cancel" UI: a looping item's active
-        // job id is autodelete:<id>:c<cycles_done>, not the plain
-        // autodelete:<id> - cancelAutoDelete() only knows the plain form, so
+        // job id is autodelete-<id>-c<cycles_done>, not the plain
+        // autodelete-<id> - cancelAutoDelete() only knows the plain form, so
         // cancelling a loop mid-flight needs the cycle number.
-        await scheduleAutoDelete(savedItemId, deleteAt, refs, `autodelete:${savedItemId}:c${item.loop_config.cycles_done || 0}`);
+        await scheduleAutoDelete(savedItemId, deleteAt, refs, `autodelete-${savedItemId}-c${item.loop_config.cycles_done || 0}`);
       } else if (item.auto_delete_at) {
         await scheduleAutoDelete(savedItemId, item.auto_delete_at, refs);
       }
@@ -123,8 +129,9 @@ function buildWorkers(telegram, connection) {
             scheduled_for: nextSendAt,
             loop_config: { ...loop, cycles_done: cyclesDone },
           }).catch(() => {});
-          // Same cycle-suffixed jobId reasoning as the auto-delete side above.
-          await schedulePost(savedItemId, nextSendAt, `post:${savedItemId}:c${cyclesDone}`);
+          // Same cycle-suffixed jobId reasoning (and '-' delimiter bugfix)
+          // as the auto-delete side above.
+          await schedulePost(savedItemId, nextSendAt, `post-${savedItemId}-c${cyclesDone}`);
         }
         return;
       }
