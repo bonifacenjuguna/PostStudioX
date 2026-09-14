@@ -481,7 +481,18 @@ async function captureAttachedCaptionOrPrompt(ctx) {
     draft.entities = entities;
     applyStripLinksDefault(draft);
     ctx.session.step = 'formatting';
-    await showStep(ctx, `${header(3)}\n\nCaption carried over. Add more formatting, links, or buttons — or tap Done.`, formattingKeyboard());
+    // v2.2.4: this used to silently carry the attached caption over with
+    // just an informational line - still auto-captured (that part was
+    // correct, no need to make people retype something they already sent),
+    // but now with an explicit confirm step so it's a decision, not an
+    // assumption.
+    await ctx.reply(
+      `📎 Caption carried over from what you sent:\n\n"${draft.caption.slice(0, 200)}"`,
+      Markup.inlineKeyboard([
+        [Markup.button.callback('✅ Keep This Caption', 'cp:capconfirm:keep')],
+        [Markup.button.callback('✏️ Edit It', 'cp:capconfirm:edit'), Markup.button.callback('🗑 Clear It', 'cp:capconfirm:clear')],
+      ])
+    );
     return;
   }
   ctx.session.step = 'caption_for_media';
@@ -492,6 +503,22 @@ async function handleMedia(ctx) {
   const step = ctx.session.step;
   const draft = ctx.session.draft;
   if (!draft) return;
+
+  if (step === 'awaiting_media_replace') {
+    let fileId, type;
+    if (ctx.message.photo) { fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id; type = 'photo'; }
+    else if (ctx.message.video) { fileId = ctx.message.video.file_id; type = 'video'; }
+    else if (ctx.message.document) { fileId = ctx.message.document.file_id; type = 'document'; }
+    else {
+      await ctx.reply('Send a photo, video, or document to replace the current media with.');
+      return;
+    }
+    draft.mediaType = type;
+    draft.mediaItems = [{ file_id: fileId, type }];
+    ctx.session.step = 'formatting';
+    await showStep(ctx, `${header(3)}\n\n🖼 Media replaced. Add more formatting, links, or buttons — or tap Done.`, formattingKeyboard());
+    return;
+  }
 
   if (step === 'awaiting_import') {
     // v2.2.0 FIX (#7): this used to always return without checking whether
@@ -600,6 +627,16 @@ async function buildPreviewPanel(draft, ctx) {
       text += '\n\n💡 HEADS UP:\n' + validation.warnings.map((w) => `• ${w}`).join('\n');
     }
     rows.push([Markup.button.callback('✏️ Edit Caption', 'cp:edit:caption'), Markup.button.callback('🔘 Edit Buttons', 'cp:buttons:add')]);
+    // v2.2.4 (media management gap): editing only ever touched the
+    // caption - there was no way to swap or remove the actual
+    // photo/video/document without starting the whole post over. These
+    // work on the DRAFT (not yet sent), so unlike the live-edit media-type
+    // check in Edit Post, changing type freely here is fine - if this is a
+    // Replace-Live edit, cp:finish:replace already knows how to handle a
+    // type change (falls back to delete+resend automatically).
+    if (draft.mediaType !== 'text' && draft.mediaType !== 'poll') {
+      rows.push([Markup.button.callback('🖼 Replace Media', 'cp:media:replace'), Markup.button.callback('🗑 Remove Media', 'cp:media:remove')]);
+    }
     rows.push([Markup.button.callback('▫️▫️ OPTIONS ▫️▫️', 'nav:noop')]);
     rows.push([
       Markup.button.callback(`${draft.options.protect_content ? '🔒' : '🔓'} Protect Content: ${draft.options.protect_content ? 'On' : 'Off'}`, 'cp:opt:toggle:protect_content'),
@@ -1061,6 +1098,50 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     ctx.session.step = 'caption_for_media';
     await showStep(ctx, `${header(3)}\n\nSend the new caption text (shorthand formatting supported):`, Markup.inlineKeyboard([backCancelRow('cp:back:formatting')]));
+  });
+
+  bot.action('cp:media:replace', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.session.step = 'awaiting_media_replace';
+    await showStep(
+      ctx,
+      `${header(3)}\n\nSend the new photo/video/document to replace the current media with (caption stays as-is unless you edit it separately):`,
+      Markup.inlineKeyboard([backCancelRow('cp:back:formatting')])
+    );
+  });
+
+  bot.action('cp:media:remove', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = ctx.session.draft;
+    draft.mediaItems = [];
+    draft.mediaType = 'text';
+    if (!draft.caption) {
+      ctx.session.step = 'awaiting_content';
+      await showStep(ctx, `${header(2)}\n\nMedia removed — this is now a text-only post. Type the message text:`, Markup.inlineKeyboard([backCancelRow('cp:back:formatting')]));
+      return;
+    }
+    await showStep(ctx, `${header(3)}\n\n🗑 Media removed — this is now a text-only post using your existing caption as the message.`, formattingKeyboard());
+  });
+
+  bot.action('cp:capconfirm:keep', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.session.step = 'formatting';
+    await showStep(ctx, `${header(3)}\n\nAdd formatting, links, or buttons — or tap Done.`, formattingKeyboard(), { forceNew: true });
+  });
+
+  bot.action('cp:capconfirm:edit', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.session.step = 'caption_for_media';
+    await showStep(ctx, `${header(3)}\n\nSend the new caption text (shorthand formatting supported):`, Markup.inlineKeyboard([backCancelRow('cp:back:content')]), { forceNew: true });
+  });
+
+  bot.action('cp:capconfirm:clear', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    const draft = ctx.session.draft;
+    draft.caption = '';
+    draft.entities = [];
+    ctx.session.step = 'formatting';
+    await showStep(ctx, `${header(3)}\n\n🗑 Caption cleared. Add formatting, links, or buttons — or tap Done.`, formattingKeyboard(), { forceNew: true });
   });
 
   bot.action('cp:save:template', requireDraft, async (ctx) => {

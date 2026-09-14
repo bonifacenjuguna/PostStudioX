@@ -201,6 +201,19 @@ check('isNotModifiedError recognizes Telegram\'s no-op-edit rejection and nothin
   assert(!isNotModifiedError({}));
 });
 
+check('matchKnownPattern recognizes expected/routine Telegram errors and gives friendly, actionable messages', () => {
+  const { matchKnownPattern } = require('./src/services/actionErrors');
+  const chatNotFound = matchKnownPattern('Bad Request: chat not found');
+  assert(chatNotFound, 'chat not found should be a known pattern');
+  assert(/admin/i.test(chatNotFound.message({})), 'should mention adding the bot as admin');
+
+  const forwardNotFound = matchKnownPattern('Bad Request: message to forward not found');
+  assert(forwardNotFound, 'message to forward not found should be a known pattern');
+  assert(/deleted|reach/i.test(forwardNotFound.message({})), 'should explain the post is gone/unreachable');
+
+  assert(!matchKnownPattern('some totally unrelated error string'), 'unrelated errors should not match anything');
+});
+
 // ── 5. naturalTime — casual scheduling parser ───────────────────────────
 console.log('\n[5] naturalTime');
 try {

@@ -92,22 +92,8 @@ async function registerChannelFromChatId(ctx, chatIdOrUsername) {
     await ctx.reply(`✅ Registered: ${saved.title || saved.chat_id}\n\nUse Manage Channel any time to check rights, mute alerts, or set a post signature.`, subScreenReplyKeyboard());
     await enter(ctx);
   } catch (err) {
-    // v2.2.0 FIX (#1, round 2): "chat not found" is the single most common,
-    // fully expected outcome here - it just means the bot hasn't been
-    // added to that chat yet, not an actual system error. Give it its own
-    // plain-language message instead of the raw diagnostic format, which
-    // is meant for genuinely unexpected failures, not routine "not set up
-    // yet" states.
-    const description = err?.description || err?.message || '';
-    if (/chat not found/i.test(description)) {
-      await ctx.reply(
-        "🔍 I couldn't find that chat — it looks like the bot hasn't been added to it yet.\n\n" +
-          'To fix this: open the channel in Telegram, add this bot as an admin (with at least "Post Messages" rights), then try adding it here again.'
-      );
-      return;
-    }
     const msg = await logAction({ scene: 'channels', step: 'register', attempted: `verify admin status for ${target}`, error: err });
-    await ctx.reply(`${msg}\n\nMake sure the bot has been added to it first.`);
+    await ctx.reply(msg);
   }
 }
 

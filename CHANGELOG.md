@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.2.4 — media management, caption confirmation, and centralized friendly errors
+
+- **Media replace/remove**: editing a post previously only ever touched the caption — now 🖼 Replace Media and 🗑 Remove Media are available right in the Preview screen, for both a regular new post and an in-progress live-post edit.
+- **Caption confirmation with real buttons**: sending media with a caption already attached still carries it over automatically (that part was correct) — now with an explicit ✅ Keep / ✏️ Edit / 🗑 Clear choice instead of just an informational line, so it's a decision rather than an assumption.
+- **Centralized "known error → friendly message" handling**: previously this was hand-rolled per spot (Channels' "chat not found" check, for instance, was written inline just for that one place). Moved into a single table in `actionErrors.js` so every call site benefits automatically. Added "message to forward not found" (a linked/forwarded post no longer exists or is unreachable) to that table — Import and Replace-Live both needed zero additional changes to pick this up, which is exactly the point of centralizing it.
+
 ## v2.2.3 — "message is not modified" fixed, and a real post-management toolkit
 
 - **Fixed "message is not modified" being shown as an error.** Telegram rejects an edit outright if the new content is byte-identical to what's already live (e.g. Strip Links finding nothing to strip) — that's a harmless no-op, not a failure. Now recognized and treated as success everywhere a live edit happens (Replace Live Post, and Edit Post's caption/rollback/strip-links flows, which had the same latent issue).
