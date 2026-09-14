@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.2.5 — Import actually previews now, and a real pre-send validator
+
+- **Import shows the actual post now, before you edit it.** It used to just confirm "imported" as text and drop you into the formatting keyboard — felt like starting a new post rather than editing an existing one. Now lands on the full visual Preview immediately, links-replace and strip-links both reachable right there too.
+- **Built a real pre-send validator, not just an informational one.** `validateDraft` already existed but only ever produced the "heads up" notes shown in Preview — nothing actually stopped a broken draft from reaching Telegram. It's now a genuine gate before Send/Schedule/Replace, and it checks more than emptiness: missing poll questions, too-few poll answers, a media post type with no file actually attached, a media group with fewer than 2 items. An empty text-only post is caught here, with a specific message, instead of reaching Telegram's own API and getting rejected with a raw code after the fact.
+- **"message text is empty" (and similar) added to the friendly-error table** as a defense-in-depth backstop, in case a future path ever bypasses the validator above.
+- Fixed a latent bug in the smoke-test harness itself: `check()` didn't actually await async test functions, so any async check would have silently reported success regardless of whether its assertions passed. Fixed, and verified the new validator tests actually catch real logic errors (confirmed with a temporary dependency stub, since `pg` isn't installable in this environment).
+
 ## v2.2.4 — media management, caption confirmation, and centralized friendly errors
 
 - **Media replace/remove**: editing a post previously only ever touched the caption — now 🖼 Replace Media and 🗑 Remove Media are available right in the Preview screen, for both a regular new post and an in-progress live-post edit.

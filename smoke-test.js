@@ -16,10 +16,29 @@ const path = require('path');
 
 let passed = 0;
 let failed = 0;
+const pendingChecks = [];
 
 function check(label, fn) {
   try {
-    fn();
+    const result = fn();
+    if (result && typeof result.then === 'function') {
+      // Async check (e.g. anything hitting a DB-backed function) - queued
+      // rather than awaited inline, since this file is a plain top-to-
+      // bottom script, not wrapped in an async function itself.
+      pendingChecks.push(
+        result
+          .then(() => {
+            console.log(`  ✅ ${label}`);
+            passed += 1;
+          })
+          .catch((err) => {
+            console.log(`  🔴 ${label}`);
+            console.log(`     ${err.message}`);
+            failed += 1;
+          })
+      );
+      return;
+    }
     console.log(`  ✅ ${label}`);
     passed += 1;
   } catch (err) {
@@ -211,8 +230,53 @@ check('matchKnownPattern recognizes expected/routine Telegram errors and gives f
   assert(forwardNotFound, 'message to forward not found should be a known pattern');
   assert(/deleted|reach/i.test(forwardNotFound.message({})), 'should explain the post is gone/unreachable');
 
+  const emptyText = matchKnownPattern('Bad Request: message text is empty');
+  assert(emptyText, 'message text is empty should be a known pattern (defense-in-depth backstop)');
+
   assert(!matchKnownPattern('some totally unrelated error string'), 'unrelated errors should not match anything');
 });
+
+// ── 8. preSendValidator — real content validation, not just informational ─
+// Wrapped in try/catch: preSendValidator.js transitively requires the
+// channels DB model (for 'pg'), a link checker, and a dedupe checker at
+// module-load time, none of which are installable in this offline sandbox
+// (no npm registry access) - same situation as naturalTime/luxon above.
+// Will run cleanly once real dependencies are installed in the deployment.
+console.log('\n[8] preSendValidator');
+try {
+  const { validateDraft } = require('./src/services/preSendValidator');
+
+  check('an empty text-only draft is rejected with a clear, specific issue', async () => {
+    const result = await validateDraft({ mediaType: 'text', caption: '   ', entities: [], buttons: [], channelIds: [] }, { requireChannels: false });
+    assert(!result.ok, 'empty text-only draft should fail validation');
+    assert(result.issues.some((i) => /no text/i.test(i)), 'should explain the post has no text');
+  });
+
+  check('a non-empty text-only draft passes', async () => {
+    const result = await validateDraft({ mediaType: 'text', caption: 'hello world', entities: [], buttons: [], channelIds: [] }, { requireChannels: false });
+    assert(result.ok, 'non-empty draft should pass');
+  });
+
+  check('a photo post with no caption is fine (media posts don\'t require caption text)', async () => {
+    const result = await validateDraft({ mediaType: 'photo', mediaItems: [{ file_id: 'abc', type: 'photo' }], caption: '', entities: [], buttons: [], channelIds: [] }, { requireChannels: false });
+    assert(result.ok, 'a photo with no caption should be valid');
+  });
+
+  check('a media post type with no actual file attached is rejected', async () => {
+    const result = await validateDraft({ mediaType: 'photo', mediaItems: [], caption: '', entities: [], buttons: [], channelIds: [] }, { requireChannels: false });
+    assert(!result.ok, 'photo type with no file should fail');
+  });
+
+  check('a poll with no question or too few answers is rejected', async () => {
+    const result = await validateDraft({ mediaType: 'poll', options: {}, caption: '', entities: [], buttons: [], channelIds: [] }, { requireChannels: false });
+    assert(!result.ok);
+    assert(result.issues.some((i) => /question/i.test(i)));
+    assert(result.issues.some((i) => /2 answer/i.test(i)));
+  });
+} catch (err) {
+  console.log(`  🔴 preSendValidator section could not run: ${err.message}`);
+  failed += 1;
+}
 
 // ── 5. naturalTime — casual scheduling parser ───────────────────────────
 console.log('\n[5] naturalTime');
@@ -312,5 +376,7 @@ check('the OLD colon-based single-segment format is confirmed invalid (documents
 });
 
 // ── Summary ────────────────────────────────────────────────────────────
-console.log(`\n${passed} passed, ${failed} failed\n`);
-process.exit(failed > 0 ? 1 : 0);
+Promise.all(pendingChecks).then(() => {
+  console.log(`\n${passed} passed, ${failed} failed\n`);
+  process.exit(failed > 0 ? 1 : 0);
+});

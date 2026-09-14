@@ -20,6 +20,30 @@ async function validateDraft(draft, { requireChannels = true } = {}) {
     issues.push(`Text is ${draft.caption.length} chars, over the ${limit} limit for this post type.`);
   }
 
+  // v2.2.5 FIX: this validator existed but never checked for genuinely
+  // empty content, and was only ever called informationally (to build the
+  // Preview screen's warnings) - never as an actual gate before sending.
+  // That combination let an empty text-only post reach Telegram's own
+  // sendMessage call, which rejects it outright ("message text is empty")
+  // - by then it's too late to give the owner a clean chance to fix it.
+  if (draft.mediaType === 'text' && (draft.caption || '').trim().length === 0) {
+    issues.push('This post has no text — a text-only post needs some content before it can be sent.');
+  }
+  if (draft.mediaType === 'poll') {
+    if (!draft.options?.poll?.question || draft.options.poll.question.trim().length === 0) {
+      issues.push('This poll has no question yet.');
+    }
+    if (!draft.options?.poll?.answers || draft.options.poll.answers.length < 2) {
+      issues.push('A poll needs at least 2 answer options.');
+    }
+  }
+  if (['photo', 'video', 'document'].includes(draft.mediaType) && (!draft.mediaItems || draft.mediaItems.length === 0)) {
+    issues.push(`This post is set to ${draft.mediaType}, but no file was actually attached.`);
+  }
+  if (draft.mediaType === 'media_group' && (!draft.mediaItems || draft.mediaItems.length < 2)) {
+    issues.push('A media group needs at least 2 photos/videos — use a single Photo/Video post type for just one.');
+  }
+
   if (requireChannels) {
     if (!draft.channelIds || draft.channelIds.length === 0) {
       issues.push('No target channel selected.');

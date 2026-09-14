@@ -209,12 +209,13 @@ async function handleImportInput(ctx) {
     const sourceChat = ctx.message.forward_from_chat || ctx.message.forward_origin.chat;
     Object.assign(draft, fields);
     draft.importedFrom = { chat_id: String(sourceChat.id), message_id: ctx.message.forward_from_message_id || ctx.message.message_id, via: 'forward' };
-    ctx.session.step = 'formatting';
-    await showStep(
-      ctx,
-      `${header(3)}\n\n📥 Imported. Formatting, media, and links carried over as-is — use 🔀 Replace All Links below if you want to swap the links, or edit anything else.`,
-      formattingKeyboard()
-    );
+    // v2.2.5 FIX: this used to land on the plain Formatting keyboard with
+    // no visual of what was actually imported - just a text confirmation,
+    // then straight into "start creating a post" territory. Import should
+    // feel like import-then-edit: see the real imported post rendered,
+    // THEN decide what to change.
+    await ctx.reply('📥 Imported — here\'s exactly what came across:');
+    await goToPreview(ctx);
     return true;
   }
 
@@ -249,12 +250,8 @@ async function handleImportInput(ctx) {
     Object.assign(draft, fields);
     draft.importedFrom = { chat_id: String(sourceChatId), message_id: messageId, via: 'link' };
     await ctx.telegram.deleteMessage(ctx.chat.id, fetched.message_id).catch(() => {});
-    ctx.session.step = 'formatting';
-    await showStep(
-      ctx,
-      `${header(3)}\n\n📥 Imported. Formatting, media, and links carried over as-is — use 🔀 Replace All Links below if you want to swap the links, or edit anything else.`,
-      formattingKeyboard()
-    );
+    await ctx.reply('📥 Imported — here\'s exactly what came across:');
+    await goToPreview(ctx);
   } catch (err) {
     const msg = await logAction({ scene: 'create-post', step: 'import', attempted: `read post ${messageId} from ${sourceChatId} via link`, error: err });
     await ctx.reply(msg);
@@ -441,12 +438,15 @@ async function handleText(ctx) {
     const result = replaceAllLinks(draft.caption, draft.entities, newUrl);
     draft.caption = result.text;
     draft.entities = result.entities;
+    const resultLine = result.linksFound ? `🔀 All links replaced with ${newUrl}.` : 'No links were found to replace — nothing changed.';
+    if (ctx.session.replaceLinksReturnTo === 'preview') {
+      delete ctx.session.replaceLinksReturnTo;
+      await ctx.reply(resultLine);
+      await goToPreview(ctx);
+      return;
+    }
     ctx.session.step = 'formatting';
-    await showStep(
-      ctx,
-      `${header(3)}\n\n${result.linksFound ? `🔀 All links replaced with ${newUrl}.` : 'No links were found to replace — nothing changed.'}`,
-      formattingKeyboard()
-    );
+    await showStep(ctx, `${header(3)}\n\n${resultLine}`, formattingKeyboard());
     return;
   }
 
@@ -649,7 +649,10 @@ async function buildPreviewPanel(draft, ctx) {
     // per-post options, for visibility - same action, just reachable from
     // both places now instead of only one.
     if (draft.caption) {
-      rows.push([Markup.button.callback('🚫 Strip All Links From This Post', 'cp:opt:striplinks')]);
+      rows.push([
+        Markup.button.callback('🚫 Strip All Links', 'cp:opt:striplinks'),
+        Markup.button.callback('🔀 Replace All Links', 'cp:opt:replacelinks'),
+      ]);
     }
     rows.push([
       Markup.button.callback(`🔁 Loop Mode: ${draft.options.loop?.enabled ? 'On' : 'Off'}`, 'cp:loop:menu'),
@@ -1053,6 +1056,13 @@ async function registerHandlers(bot) {
     await backToPreviewPanel(ctx);
   });
 
+  bot.action('cp:opt:replacelinks', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.session.step = 'awaiting_replace_links_url';
+    ctx.session.replaceLinksReturnTo = 'preview';
+    await ctx.reply('🔀 Send the one new link — every existing link in this post will be replaced with it (labels stay the same).', Markup.inlineKeyboard([backCancelRow('cp:finish:backpreview')]));
+  });
+
   bot.action('cp:loop:menu', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     const loop = ensureLoopDefaults(ctx.session.draft);
@@ -1284,6 +1294,12 @@ async function registerHandlers(bot) {
     const target = draft.replaceTarget;
     if (!target) return;
 
+    const contentCheck = await validateDraft(draft, { requireChannels: false });
+    if (!contentCheck.ok) {
+      await ctx.reply(`⚠️ Can't replace yet — this needs fixing first:\n\n${contentCheck.issues.map((i) => `• ${i}`).join('\n')}`);
+      return;
+    }
+
     const item = await savedItems.findById(target.itemId);
     if (!item) {
       await ctx.reply('That post is no longer tracked — nothing to replace.');
@@ -1363,6 +1379,23 @@ async function registerHandlers(bot) {
   bot.action(/^cp:finish:(send|schedule|send_template)$/, requireDraft, async (ctx) => {
     const action = ctx.match[1];
     await ctx.answerCbQuery();
+    const draft = ctx.session.draft;
+
+    // v2.2.5 FIX: validateDraft existed but was only ever used to show
+    // informational warnings in Preview - nothing actually stopped a bad
+    // draft (e.g. empty text) from reaching Telegram's own API, which
+    // rejects it outright, but only after a 5-second undo window had
+    // already passed and looked like it was working. Now a real gate,
+    // content-related issues checked before channel selection even happens.
+    const contentCheck = await validateDraft(draft, { requireChannels: false });
+    if (!contentCheck.ok) {
+      await ctx.reply(
+        `⚠️ Can't send yet — this needs fixing first:\n\n${contentCheck.issues.map((i) => `• ${i}`).join('\n')}`,
+        Markup.inlineKeyboard([backCancelRow('cp:finish:backpreview')])
+      );
+      return;
+    }
+
     const channels = await channelsModel.list();
     if (channels.length === 0) {
       // v2.0.0 FIX: this used to be a plain text dead end ("go add a

@@ -53,6 +53,15 @@ const KNOWN_PATTERNS = [
     message: () =>
       "🔒 The bot doesn't currently have the rights needed for that action in this chat — check ⚙️ Settings → 📡 Channels → 🔄 Re-check Rights.",
   },
+  {
+    // Defense-in-depth: validateDraft (preSendValidator.js) should catch
+    // this before it ever reaches Telegram, but if it somehow doesn't
+    // (an edge case the validator missed), this is the backstop - still a
+    // plain, actionable message instead of a raw code.
+    test: /message text is empty|caption is too long|message is too long/i,
+    message: () =>
+      "📝 That post has no usable content to send — check that it has text (for a text post) or hasn't gone over Telegram's length limit.",
+  },
 ];
 
 function matchKnownPattern(reason) {
