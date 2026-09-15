@@ -147,11 +147,83 @@ function formattingKeyboard() {
     [Markup.button.callback('💬 Quote', 'cp:fmt:blockquote'), Markup.button.callback('💬 Expandable Quote', 'cp:fmt:expandable_blockquote')],
     [Markup.button.callback('🔗 Link', 'cp:fmt:link')],
     [Markup.button.callback('🚫 Remove All Links', 'cp:fmt:striplinks'), Markup.button.callback('🔀 Replace All Links', 'cp:fmt:replacelinks')],
-    [Markup.button.callback('🔘 Add Buttons', 'cp:buttons:add')],
+    [Markup.button.callback('🔘 Manage Buttons', 'cp:buttons:manage')],
     [Markup.button.callback('❓ Formatting Help', 'cp:fmt:help')],
     [Markup.button.callback('✅ Done, continue', 'cp:fmt:done')],
     backCancelRow('cp:back:content'),
   ]);
+}
+
+// v2.2.6: previously every formatting action (bold applied, link added,
+// button created...) just edited the same control-panel text bubble with a
+// one-line confirmation - no visual of the actual post, and since it edits
+// in place, scrolling back to see what things looked like before your last
+// few edits meant hunting through a chat log for a message that kept
+// changing under you. Every one of these call sites now sends the REAL
+// rendered preview (sendPreview - same renderer Preview itself uses) as a
+// fresh message, so you always see exactly what the post looks like right
+// now, plus a fresh status+keyboard message after it - never edited in
+// place, always a new message, per the explicit request for this pattern
+// everywhere in the bot, not just here.
+async function showFormattingStep(ctx, statusLine) {
+  const draft = ctx.session.draft;
+  await sendPreview(ctx, draft).catch(() => {});
+  await ctx.reply(`${header(3)}\n\n${statusLine}`, formattingKeyboard());
+}
+
+// v2.2.6 (edit feature gap): polls previously had no way to edit the
+// question or answers once past initial creation - only the
+// Anonymous/Multiple/Quiz toggles were reachable again later. Distinct
+// callback names from cp:poll:toggle:* (used during initial creation, see
+// pollOptionsKeyboard above) so editing the reply markup here never
+// clobbers that screen's own keyboard by accident.
+function pollEditKeyboard(draft) {
+  const p = draft.options.poll;
+  const rows = [];
+  rows.push([Markup.button.callback('✏️ Edit Question', 'cp:polledit:question')]);
+  (p.answers || []).forEach((ans, i) => {
+    rows.push([
+      Markup.button.callback(`${i + 1}. ${ans}`, 'nav:noop'),
+      Markup.button.callback('🗑', `cp:polledit:delanswer:${i}`),
+    ]);
+  });
+  rows.push([Markup.button.callback('➕ Add Answer', 'cp:polledit:addanswer')]);
+  rows.push([Markup.button.callback(`${p.isAnonymous !== false ? '✅' : '⬜'} Anonymous`, 'cp:polledit:toggle:isAnonymous')]);
+  rows.push([Markup.button.callback(`${p.allowsMultiple ? '✅' : '⬜'} Allow multiple answers`, 'cp:polledit:toggle:allowsMultiple')]);
+  rows.push([Markup.button.callback(`${p.quizMode ? '✅' : '⬜'} Quiz mode`, 'cp:polledit:toggle:quizMode')]);
+  rows.push(backCancelRow('cp:back:formatting'));
+  return Markup.inlineKeyboard(rows);
+}
+
+async function showPollEditPanel(ctx) {
+  const draft = ctx.session.draft;
+  await sendPreview(ctx, draft).catch(() => {});
+  await ctx.reply(`${header(3)}\n\n📊 Edit Poll`, pollEditKeyboard(draft));
+}
+
+async function showButtonsManagePanel(ctx) {
+  const draft = ctx.session.draft;
+  const rows = [];
+  (draft.buttons || []).forEach((row, r) => {
+    row.forEach((btn, c) => {
+      const styleTag = btn.style ? ` ${colorLabel(btn.style)}` : '';
+      const kindTag = btn.note ? ' 💬' : ' 🔗';
+      rows.push([
+        Markup.button.callback(`✏️ ${btn.text}${kindTag}${styleTag}`, `cp:btnedit:${r}:${c}`),
+        Markup.button.callback('🗑', `cp:btndelete:${r}:${c}`),
+      ]);
+    });
+  });
+  rows.push([Markup.button.callback('➕ Add New Button', 'cp:buttons:add')]);
+  rows.push(backCancelRow('cp:back:formatting'));
+
+  await sendPreview(ctx, draft).catch(() => {});
+  await ctx.reply(
+    rows.length > 2
+      ? `${header(3)}\n\n🔘 Manage Buttons — tap a button to edit it, or 🗑 to remove it:`
+      : `${header(3)}\n\n🔘 No buttons yet — add one below.`,
+    Markup.inlineKeyboard(rows)
+  );
 }
 
 const FORMAT_HELP_TEXT =
@@ -312,7 +384,7 @@ async function handleText(ctx) {
       draft.entities = entities;
       applyStripLinksDefault(draft);
       ctx.session.step = 'formatting';
-      await showStep(ctx, `${header(3)}\n\nAdd formatting, links, or buttons — or tap Done.`, formattingKeyboard());
+      await showFormattingStep(ctx, 'Add formatting, links, or buttons — or tap Done.');
       return;
     }
   }
@@ -341,24 +413,49 @@ async function handleText(ctx) {
     draft.entities = entities;
     applyStripLinksDefault(draft);
     ctx.session.step = 'formatting';
-    await showStep(ctx, `${header(3)}\n\nAdd formatting, links, or buttons — or tap Done.`, formattingKeyboard());
+    await showFormattingStep(ctx, 'Add formatting, links, or buttons — or tap Done.');
+    return;
+  }
+
+  if (step === 'awaiting_poll_edit_question') {
+    draft.options.poll.question = text.trim();
+    ctx.session.step = 'formatting';
+    await showPollEditPanel(ctx);
+    return;
+  }
+
+  if (step === 'awaiting_poll_edit_addanswer') {
+    draft.options.poll.answers.push(text.trim());
+    ctx.session.step = 'formatting';
+    await showPollEditPanel(ctx);
     return;
   }
 
   if (step === 'awaiting_link_text') {
-    ctx.session.linkDraft = { text };
+    // v2.2.6 FIX: this used to take freshly-typed text and APPEND it to the
+    // end of the caption as new content - completely inconsistent with
+    // every other format (bold, italic, quote...), which all find an
+    // EXISTING phrase in the caption and wrap it. Now matches that same
+    // pattern: find the phrase first, ask for the URL after.
+    const target = text.trim();
+    const applyWhole = target.toUpperCase() === 'ALL';
+    const idx = applyWhole ? 0 : draft.caption.indexOf(target);
+    if (!applyWhole && idx === -1) {
+      await ctx.reply(`Couldn't find "${target}" in your caption exactly as typed — try again, or send ALL for the whole text.`);
+      return;
+    }
+    ctx.session.linkDraft = { offset: idx, length: applyWhole ? draft.caption.length : target.length };
     ctx.session.step = 'awaiting_link_url';
-    await showStep(ctx, `${header(3)}\n\nNow send the URL for that link.`, Markup.inlineKeyboard([backCancelRow('cp:back:formatting')]));
+    await showStep(ctx, `${header(3)}\n\nNow send the URL that phrase should link to.`, Markup.inlineKeyboard([backCancelRow('cp:back:formatting')]));
     return;
   }
 
   if (step === 'awaiting_link_url') {
-    const linkText = ctx.session.linkDraft.text;
-    draft.caption += (draft.caption ? ' ' : '') + linkText;
-    const offset = draft.caption.length - linkText.length;
-    draft.entities.push({ type: 'text_link', url: text.trim(), offset, length: linkText.length });
+    const { offset, length } = ctx.session.linkDraft;
+    draft.entities.push({ type: 'text_link', url: text.trim(), offset, length });
+    delete ctx.session.linkDraft;
     ctx.session.step = 'formatting';
-    await showStep(ctx, `${header(3)}\n\n🔗 Link added. Add more, or tap Done.`, formattingKeyboard());
+    await showFormattingStep(ctx, '🔗 Link added. Add more, or tap Done.');
     return;
   }
 
@@ -400,7 +497,7 @@ async function handleText(ctx) {
     const loop = ensureLoopDefaults(draft);
     loop[step === 'awaiting_loop_stay_custom' ? 'stayMinutes' : 'gapMinutes'] = minutes;
     ctx.session.step = 'formatting'; // harmless placeholder, immediately overwritten by showStep below
-    await showStep(ctx, loopMenuText(loop), loopMenuKeyboard(loop));
+    await ctx.reply(loopMenuText(loop), loopMenuKeyboard(loop));
     return;
   }
 
@@ -412,7 +509,7 @@ async function handleText(ctx) {
     }
     const loop = ensureLoopDefaults(draft);
     loop.maxCycles = n;
-    await showStep(ctx, loopMenuText(loop), loopMenuKeyboard(loop));
+    await ctx.reply(loopMenuText(loop), loopMenuKeyboard(loop));
     return;
   }
 
@@ -428,7 +525,7 @@ async function handleText(ctx) {
     draft.entities.push({ type: ctx.session.formatAction, offset: idx, length });
     delete ctx.session.formatAction;
     ctx.session.step = 'formatting';
-    await showStep(ctx, `${header(3)}\n\n✅ Applied. Add more, or tap Done.`, formattingKeyboard());
+    await showFormattingStep(ctx, '✅ Applied. Add more, or tap Done.');
     return;
   }
 
@@ -446,7 +543,7 @@ async function handleText(ctx) {
       return;
     }
     ctx.session.step = 'formatting';
-    await showStep(ctx, `${header(3)}\n\n${resultLine}`, formattingKeyboard());
+    await showFormattingStep(ctx, resultLine);
     return;
   }
 
@@ -516,7 +613,7 @@ async function handleMedia(ctx) {
     draft.mediaType = type;
     draft.mediaItems = [{ file_id: fileId, type }];
     ctx.session.step = 'formatting';
-    await showStep(ctx, `${header(3)}\n\n🖼 Media replaced. Add more formatting, links, or buttons — or tap Done.`, formattingKeyboard());
+    await showFormattingStep(ctx, '🖼 Media replaced. Add more formatting, links, or buttons — or tap Done.');
     return;
   }
 
@@ -617,16 +714,20 @@ async function buildPreviewPanel(draft, ctx) {
   const validation = await validateDraft(draft, { requireChannels: false });
   const rows = [];
   let text = `${header(4)}\n\n`;
+  const isPoll = draft.mediaType === 'poll';
+  const editEntryButton = isPoll
+    ? Markup.button.callback('✏️ Edit Poll', 'cp:poll:edit')
+    : Markup.button.callback('✏️ Edit Caption', 'cp:edit:caption');
   if (!validation.ok) {
     text += '⚠️ ISSUES FOUND BEFORE YOU CAN SEND:\n' + validation.issues.map((i) => `• ${i}`).join('\n');
-    rows.push([Markup.button.callback('✏️ Edit Caption', 'cp:edit:caption')]);
+    rows.push([editEntryButton]);
     rows.push(backCancelRow('cp:back:formatting'));
   } else {
     text += "Here's your preview above 👆 — how do you want to finish?";
     if (validation.warnings.length) {
       text += '\n\n💡 HEADS UP:\n' + validation.warnings.map((w) => `• ${w}`).join('\n');
     }
-    rows.push([Markup.button.callback('✏️ Edit Caption', 'cp:edit:caption'), Markup.button.callback('🔘 Edit Buttons', 'cp:buttons:add')]);
+    rows.push([editEntryButton, Markup.button.callback('🔘 Edit Buttons', 'cp:buttons:manage')]);
     // v2.2.4 (media management gap): editing only ever touched the
     // caption - there was no way to swap or remove the actual
     // photo/video/document without starting the whole post over. These
@@ -978,14 +1079,14 @@ async function registerHandlers(bot) {
       return;
     }
     if (action === 'help') {
-      await showStep(ctx, `${header(3)}\n\n${FORMAT_HELP_TEXT}`, formattingKeyboard());
+      await showFormattingStep(ctx, FORMAT_HELP_TEXT);
       return;
     }
     if (action === 'striplinks') {
       const stripped = stripLinks(draft.caption, draft.entities);
       draft.caption = stripped.text;
       draft.entities = stripped.entities;
-      await showStep(ctx, `${header(3)}\n\n🚫 All links removed from the text.`, formattingKeyboard());
+      await showFormattingStep(ctx, '🚫 All links removed from the text.');
       return;
     }
     if (action === 'replacelinks') {
@@ -994,8 +1095,12 @@ async function registerHandlers(bot) {
       return;
     }
     if (action === 'link') {
+      if (!draft.caption) {
+        await showFormattingStep(ctx, 'Type your text first, then turn a phrase into a link.');
+        return;
+      }
       ctx.session.step = 'awaiting_link_text';
-      await showStep(ctx, `${header(3)}\n\nSend the visible text for the link.`, Markup.inlineKeyboard([backCancelRow('cp:back:formatting')]));
+      await showStep(ctx, `${header(3)}\n\nSend the exact word/phrase from your caption to turn into a link — or send ALL for the whole text.`, Markup.inlineKeyboard([backCancelRow('cp:back:formatting')]));
       return;
     }
     // v2.0.0 FIX: every style used to apply to the ENTIRE caption, no matter
@@ -1005,7 +1110,7 @@ async function registerHandlers(bot) {
     const ENTITY_TYPES = ['bold', 'italic', 'underline', 'strikethrough', 'spoiler', 'code', 'blockquote', 'expandable_blockquote'];
     if (ENTITY_TYPES.includes(action)) {
       if (!draft.caption) {
-        await showStep(ctx, `${header(3)}\n\nType your text first, then apply formatting.`, formattingKeyboard());
+        await showFormattingStep(ctx, 'Type your text first, then apply formatting.');
         return;
       }
       ctx.session.step = 'awaiting_format_target';
@@ -1018,10 +1123,39 @@ async function registerHandlers(bot) {
     }
   });
 
+  // v2.2.6 (edit feature gap): "Manage Buttons" replaces the old
+  // "Add Buttons"-only flow - shows every existing button with its own
+  // Edit/Delete, not just an endless Add.
+  bot.action('cp:buttons:manage', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    await showButtonsManagePanel(ctx);
+  });
+
   bot.action('cp:buttons:add', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
+    delete ctx.session.buttonEditTarget;
     ctx.session.step = 'awaiting_button_text';
     await showStep(ctx, `${header(3)}\n\nSend the button label text.`, Markup.inlineKeyboard([backCancelRow('cp:back:formatting')]));
+  });
+
+  bot.action(/^cp:btnedit:(\d+):(\d+)$/, requireDraft, async (ctx) => {
+    const r = parseInt(ctx.match[1], 10);
+    const c = parseInt(ctx.match[2], 10);
+    await ctx.answerCbQuery();
+    ctx.session.buttonEditTarget = { r, c };
+    ctx.session.step = 'awaiting_button_text';
+    const current = ctx.session.draft.buttons[r][c];
+    await showStep(ctx, `${header(3)}\n\nEditing "${current.text}" — send the new label text (or the same text to keep it):`, Markup.inlineKeyboard([backCancelRow('cp:buttons:manage')]));
+  });
+
+  bot.action(/^cp:btndelete:(\d+):(\d+)$/, requireDraft, async (ctx) => {
+    const r = parseInt(ctx.match[1], 10);
+    const c = parseInt(ctx.match[2], 10);
+    await ctx.answerCbQuery('Deleted');
+    const draft = ctx.session.draft;
+    draft.buttons[r].splice(c, 1);
+    if (draft.buttons[r].length === 0) draft.buttons.splice(r, 1);
+    await showButtonsManagePanel(ctx);
   });
 
   bot.action(/^cp:btnstyle:(.+)$/, requireDraft, async (ctx) => {
@@ -1032,11 +1166,22 @@ async function registerHandlers(bot) {
     if (ctx.session.buttonDraft.note) btn.note = ctx.session.buttonDraft.note;
     else btn.url = ctx.session.buttonDraft.url;
     if (style !== 'default') btn.style = style;
+
+    const editTarget = ctx.session.buttonEditTarget;
+    if (editTarget) {
+      draft.buttons[editTarget.r][editTarget.c] = btn;
+      delete ctx.session.buttonEditTarget;
+      delete ctx.session.buttonDraft;
+      ctx.session.step = 'formatting';
+      await showButtonsManagePanel(ctx);
+      return;
+    }
+
     if (draft.buttons.length === 0) draft.buttons.push([]);
     draft.buttons[draft.buttons.length - 1].push(btn);
     delete ctx.session.buttonDraft;
     ctx.session.step = 'formatting';
-    await showStep(ctx, `${header(3)}\n\n🔘 Button added (${colorLabel(style)}).`, formattingKeyboard());
+    await showFormattingStep(ctx, `🔘 Button added (${colorLabel(style)}).`);
   });
 
   bot.action(/^cp:opt:toggle:(.+)$/, requireDraft, async (ctx) => {
@@ -1066,7 +1211,7 @@ async function registerHandlers(bot) {
   bot.action('cp:loop:menu', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     const loop = ensureLoopDefaults(ctx.session.draft);
-    await showStep(ctx, loopMenuText(loop), loopMenuKeyboard(loop));
+    await ctx.reply(loopMenuText(loop), loopMenuKeyboard(loop));
   });
 
   bot.action(/^cp:loop:(stay|gap):(\d+)$/, requireDraft, async (ctx) => {
@@ -1074,7 +1219,7 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     const loop = ensureLoopDefaults(ctx.session.draft);
     loop[field === 'stay' ? 'stayMinutes' : 'gapMinutes'] = parseInt(minutesStr, 10);
-    await showStep(ctx, loopMenuText(loop), loopMenuKeyboard(loop));
+    await ctx.reply(loopMenuText(loop), loopMenuKeyboard(loop));
   });
 
   bot.action(/^cp:loop:(stay|gap)custom$/, requireDraft, async (ctx) => {
@@ -1088,7 +1233,7 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     const loop = ensureLoopDefaults(ctx.session.draft);
     loop.maxCycles = null;
-    await showStep(ctx, loopMenuText(loop), loopMenuKeyboard(loop));
+    await ctx.reply(loopMenuText(loop), loopMenuKeyboard(loop));
   });
 
   bot.action('cp:loop:cycles:set', requireDraft, async (ctx) => {
@@ -1101,7 +1246,7 @@ async function registerHandlers(bot) {
     await ctx.answerCbQuery();
     const loop = ensureLoopDefaults(ctx.session.draft);
     loop.enabled = !loop.enabled;
-    await showStep(ctx, loopMenuText(loop), loopMenuKeyboard(loop));
+    await ctx.reply(loopMenuText(loop), loopMenuKeyboard(loop));
   });
 
   bot.action('cp:edit:caption', requireDraft, async (ctx) => {
@@ -1130,13 +1275,13 @@ async function registerHandlers(bot) {
       await showStep(ctx, `${header(2)}\n\nMedia removed — this is now a text-only post. Type the message text:`, Markup.inlineKeyboard([backCancelRow('cp:back:formatting')]));
       return;
     }
-    await showStep(ctx, `${header(3)}\n\n🗑 Media removed — this is now a text-only post using your existing caption as the message.`, formattingKeyboard());
+    await showFormattingStep(ctx, '🗑 Media removed — this is now a text-only post using your existing caption as the message.');
   });
 
   bot.action('cp:capconfirm:keep', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     ctx.session.step = 'formatting';
-    await showStep(ctx, `${header(3)}\n\nAdd formatting, links, or buttons — or tap Done.`, formattingKeyboard(), { forceNew: true });
+    await showFormattingStep(ctx, 'Add formatting, links, or buttons — or tap Done.');
   });
 
   bot.action('cp:capconfirm:edit', requireDraft, async (ctx) => {
@@ -1151,7 +1296,7 @@ async function registerHandlers(bot) {
     draft.caption = '';
     draft.entities = [];
     ctx.session.step = 'formatting';
-    await showStep(ctx, `${header(3)}\n\n🗑 Caption cleared. Add formatting, links, or buttons — or tap Done.`, formattingKeyboard(), { forceNew: true });
+    await showFormattingStep(ctx, '🗑 Caption cleared. Add formatting, links, or buttons — or tap Done.');
   });
 
   bot.action('cp:save:template', requireDraft, async (ctx) => {
@@ -1442,6 +1587,45 @@ async function registerHandlers(bot) {
     await goToPreview(ctx);
   });
 
+  bot.action('cp:poll:edit', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    await showPollEditPanel(ctx);
+  });
+
+  bot.action('cp:polledit:question', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.session.step = 'awaiting_poll_edit_question';
+    await ctx.reply('Send the new poll question:', Markup.inlineKeyboard([backCancelRow('cp:poll:edit')]));
+  });
+
+  bot.action('cp:polledit:addanswer', requireDraft, async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.session.step = 'awaiting_poll_edit_addanswer';
+    await ctx.reply('Send the new answer option to add:', Markup.inlineKeyboard([backCancelRow('cp:poll:edit')]));
+  });
+
+  bot.action(/^cp:polledit:delanswer:(\d+)$/, requireDraft, async (ctx) => {
+    const i = parseInt(ctx.match[1], 10);
+    await ctx.answerCbQuery();
+    const draft = ctx.session.draft;
+    if (draft.options.poll.answers.length <= 2) {
+      await ctx.reply('A poll needs at least 2 answers — add another before removing this one.');
+      return;
+    }
+    draft.options.poll.answers.splice(i, 1);
+    await showPollEditPanel(ctx);
+  });
+
+  bot.action(/^cp:polledit:toggle:(.+)$/, requireDraft, async (ctx) => {
+    const field = ctx.match[1];
+    await ctx.answerCbQuery();
+    const draft = ctx.session.draft;
+    draft.options.poll[field] = !draft.options.poll[field];
+    try {
+      await ctx.editMessageReplyMarkup(pollEditKeyboard(draft).reply_markup);
+    } catch (_) {}
+  });
+
   bot.action(/^cp:undo:(\d+)$/, async (ctx) => {
     const id = parseInt(ctx.match[1], 10);
     await ctx.answerCbQuery('Undone');
@@ -1463,7 +1647,7 @@ async function registerHandlers(bot) {
   bot.action('cp:back:formatting', requireDraft, async (ctx) => {
     await ctx.answerCbQuery();
     ctx.session.step = 'formatting';
-    await showStep(ctx, `${header(3)}\n\nAdd formatting, links, or buttons — or tap Done.`, formattingKeyboard());
+    await showFormattingStep(ctx, 'Add formatting, links, or buttons — or tap Done.');
   });
 }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.2.6 — real button/poll editing, the Link flow fixed properly, fresh previews everywhere
+
+- **Buttons: real editing, not just adding.** "🔘 Edit Buttons" now shows every existing button with its own ✏️ Edit and 🗑 Delete — previously it silently routed to the same "add a new one" flow no matter what, so buttons could only ever be appended, never changed or removed.
+- **Polls: full editing.** New "✏️ Edit Poll" screen — edit the question, add/remove individual answers, toggle Anonymous/Multiple/Quiz — all reachable after initial creation, not just during it.
+- **Fixed the Link flow's actual design bug.** It asked for label text and a URL, then *appended* that as brand-new text at the end of the caption — completely inconsistent with every other format (Bold, Italic, Quote...), which all find an *existing* phrase and wrap it. Now it works the same way: send the exact phrase from your caption, then the URL — turning real existing text into a link, not bolting new text on.
+- **Fresh preview after every formatting action, everywhere.** Applying bold, adding a link, adding a button, replacing media — all of it now sends the actual rendered post as a new message each time, instead of editing the same status bubble in place with just a one-line confirmation. No more scrolling back through an edited-in-place message to see what things looked like a few steps ago. Applied the same fix to Loop Mode's configuration screens too, since they had the identical pattern.
+
 ## v2.2.5 — Import actually previews now, and a real pre-send validator
 
 - **Import shows the actual post now, before you edit it.** It used to just confirm "imported" as text and drop you into the formatting keyboard — felt like starting a new post rather than editing an existing one. Now lands on the full visual Preview immediately, links-replace and strip-links both reachable right there too.
